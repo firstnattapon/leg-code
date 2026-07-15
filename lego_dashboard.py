@@ -6,14 +6,14 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
+from pathlib import Path
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import streamlit as st
 from google.cloud import firestore
-from google.oauth2 import service_account
 
 # Streamlit Cloud can hot-reload this entry point without evicting an older
 # lego_pipeline module.  Reload it before importing names when the StageSpec
@@ -21,7 +21,7 @@ from google.oauth2 import service_account
 # compatible unit.
 import lego_pipeline as _lego_pipeline
 
-EXPECTED_PIPELINE_SCHEMA_VERSION = 2
+EXPECTED_PIPELINE_SCHEMA_VERSION = 3
 if (
     getattr(_lego_pipeline, "PIPELINE_SCHEMA_VERSION", 0)
     != EXPECTED_PIPELINE_SCHEMA_VERSION
@@ -50,9 +50,13 @@ from manual_tools import (
     generate_client_order_id,
 )
 from lego_uat import (
-    account_fingerprint,
     build_audit_event,
     redact_payload,
+)
+from webull_lego_single_file import (
+    WebullSettings,
+    decode_dna as decode_guide_dna,
+    load_live_inputs,
 )
 
 
@@ -102,28 +106,9 @@ def load_dashboard_config() -> LegoDashboardConfig:
     )
 
 
-@st.cache_resource(show_spinner=False)
-def firestore_client(firebase_json: str) -> firestore.Client:
-    info = json.loads(firebase_json)
-    credentials = service_account.Credentials.from_service_account_info(info)
-    return firestore.Client(credentials=credentials, project=info["project_id"])
-
-
-def load_trade_log(
-    db: firestore.Client, collection: str, limit: int
-) -> pd.DataFrame:
-    documents = (
-        db.collection(collection)
-        .order_by("created_at", direction=firestore.Query.DESCENDING)
-        .limit(int(limit))
-        .stream()
-    )
-    rows = [document.to_dict() for document in documents]
-    normalized = pd.json_normalize(rows, sep="_") if rows else pd.DataFrame()
-    return prepare_raw_frame(normalized)
-
-
-def connection_fingerprint(settings: ConnectionSettings) -> str:
+def connection_fingerprint(
+    settings: ConnectionSettings, *, symbol: str = "", dna_code: str = ""
+) -> str:
     payload = "\x00".join(
         (
             settings.environment,
@@ -131,6 +116,8 @@ def connection_fingerprint(settings: ConnectionSettings) -> str:
             settings.app_key,
             settings.app_secret,
             settings.region,
+            symbol.strip().upper(),
+            dna_code.strip(),
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -181,6 +168,9 @@ def clear_connection_state(*, clear_widgets: bool = True) -> None:
         "lego_auth_summary",
         "lego_auth_fingerprint",
         "lego_reference_csv",
+        "lego_symbol",
+        "lego_dna_code",
+        "lego_all_in_status",
         "lego_uat_preview",
         "lego_uat_output",
         "lego_audit_events",
@@ -191,6 +181,8 @@ def clear_connection_state(*, clear_widgets: bool = True) -> None:
             "lego_account_id",
             "lego_app_key",
             "lego_app_secret",
+            "lego_symbol_input",
+            "lego_dna_code_input",
             "lego_submit_confirmation",
             "lego_cancel_confirmation",
         ):
@@ -207,6 +199,84 @@ def _latest_stage_row(stage_result: StageResult) -> pd.Series:
     if stage_result.frame.empty:
         return pd.Series(dtype=object)
     return stage_result.frame.iloc[-1]
+
+
+def _real_webull_settings(settings: ConnectionSettings) -> WebullSettings:
+    """Translate UI settings to the standalone read-only SDK contract."""
+
+    return WebullSettings(
+        environment=settings.environment,
+        account_id=settings.account_id,
+        app_key=settings.app_key,
+        app_secret=settings.app_secret,
+        region=settings.region,
+    )
+
+
+def authenticate_and_load(
+    settings: ConnectionSettings,
+    config: LegoDashboardConfig,
+    *,
+    symbol: str,
+    dna_code: str,
+) -> tuple[pd.DataFrame, firestore.Client, dict[str, Any]]:
+    """Run real Step 0 reads; this is shared by Connect and All-in."""
+
+    settings.validate()
+    if not config.firebase_info:
+        raise ValueError("Missing [firebase_service_account] in Streamlit secrets")
+    dna_summary: dict[str, Any] = {"mode": "logged-only"}
+    if dna_code.strip():
+        dna, dna_summary = decode_guide_dna(dna_code)
+        dna_summary = {
+            **dna_summary,
+            "ones": int(dna.sum()),
+            "zeros": int(len(dna) - dna.sum()),
+            "preview_first_20": dna[:20].astype(int).tolist(),
+        }
+    live = load_live_inputs(
+        _real_webull_settings(settings),
+        firebase_info=config.firebase_info,
+        collection=config.trade_collection,
+        limit=config.trade_limit,
+        symbol=symbol,
+    )
+    raw = prepare_raw_frame(live.raw)
+    summary = {
+        **live.safe_summary,
+        "firestore_project": config.firebase_info.get("project_id"),
+        "dna_decoder": dna_summary,
+    }
+    return raw, live.firestore_client, summary
+
+
+def run_all_pipeline_stages(
+    raw: pd.DataFrame,
+    config: LegoDashboardConfig,
+    *,
+    dna_code: str,
+    on_step: Callable[[int], None] | None = None,
+) -> dict[int, StageResult]:
+    """Run pure Steps 1→17 and prove Step 18 can be materialized."""
+
+    results: dict[int, StageResult] = {}
+    context = PipelineContext(
+        fix_c=config.fix_c,
+        source_hash=dataframe_fingerprint(raw),
+        dna_code=dna_code,
+    )
+    previous = None
+    for stage_number in range(1, 18):
+        result = run_stage(stage_number, raw, previous, context)
+        results[stage_number] = result
+        previous = result
+        if on_step is not None:
+            on_step(stage_number)
+    final_dataframe(results[17])
+    what_if_dataframe(results[17], config.fix_c)
+    if on_step is not None:
+        on_step(18)
+    return results
 
 
 def render_uat_panel(stage_result: StageResult) -> None:
@@ -508,6 +578,7 @@ def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
         context = PipelineContext(
             fix_c=config.fix_c,
             source_hash=dataframe_fingerprint(raw),
+            dna_code=st.session_state.get("lego_dna_code", ""),
         )
         try:
             results[stage.number] = run_stage(
@@ -554,7 +625,7 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
     st.subheader("Step 0 — Authenticated connection")
     st.info(
         "กรอก Webull credential ใน session นี้ แล้วกด Connect & Load เพื่อยืนยัน "
-        "Webull Positions และอ่าน Firestore trade log"
+        "Webull Account list + Balance + Positions + Quote และอ่าน Firestore trade log จริง"
     )
     environment = st.selectbox(
         "Environment",
@@ -581,6 +652,18 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
         key="lego_app_secret",
         autocomplete="off",
     )
+    symbol = st.text_input(
+        "Symbol สำหรับ Webull quote (optional)",
+        value="",
+        key="lego_symbol_input",
+        help="ถ้าเว้นว่าง จะใช้ symbol แรกจาก Firestore trade log",
+    ).strip().upper()
+    dna_code = st.text_input(
+        "DNA_CODE (encoded, bypass:N หรือ [1,N])",
+        value="",
+        key="lego_dna_code_input",
+        help="signal ที่บอท log ไว้มีสิทธิ์ก่อน; decoder เติมเฉพาะ signal ที่หายไป",
+    ).strip()
     reference_file = st.file_uploader(
         "CSV reference (optional — ไม่ใช้แทน Firestore หลัก)",
         type=["csv"],
@@ -594,7 +677,9 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
         app_secret=app_secret,
         region="th",
     )
-    current_fingerprint = connection_fingerprint(settings)
+    current_fingerprint = connection_fingerprint(
+        settings, symbol=symbol, dna_code=dna_code
+    )
     stored_fingerprint = st.session_state.get("lego_auth_fingerprint")
     if stored_fingerprint and stored_fingerprint != current_fingerprint:
         clear_connection_state(clear_widgets=False)
@@ -619,20 +704,13 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
     if connect_clicked:
         try:
             settings.validate()
-            if not config.firebase_info:
-                raise ValueError(
-                    "Missing [firebase_service_account] in Streamlit secrets"
+            with st.spinner("ยิง Webull API จริงและโหลด Firestore จริง..."):
+                raw, db, live_summary = authenticate_and_load(
+                    settings,
+                    config,
+                    symbol=symbol,
+                    dna_code=dna_code,
                 )
-            with st.spinner("ยืนยัน Webull และโหลด Firestore..."):
-                started = time.perf_counter()
-                positions = WebullManualClient(settings).get_positions()
-                db = firestore_client(
-                    json.dumps(config.firebase_info, sort_keys=True)
-                )
-                raw = load_trade_log(
-                    db, config.trade_collection, config.trade_limit
-                )
-                elapsed = time.perf_counter() - started
 
             reference = None
             if reference_file is not None:
@@ -644,19 +722,14 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
             st.session_state.lego_config = config
             st.session_state.lego_raw = raw
             st.session_state.lego_reference_csv = reference
+            st.session_state.lego_symbol = symbol
+            st.session_state.lego_dna_code = dna_code
             st.session_state.lego_results = {}
             st.session_state.lego_audit_events = []
             st.session_state.lego_auth_fingerprint = current_fingerprint
             st.session_state.lego_auth_summary = {
-                "environment": environment,
-                "endpoint": settings.endpoint,
-                "account_fingerprint": account_fingerprint(account_id),
-                "firestore_project": config.firebase_info.get("project_id"),
-                "trade_collection": config.trade_collection,
-                "trade_rows": len(raw),
+                **live_summary,
                 "reference_csv_rows": len(reference) if reference is not None else 0,
-                "elapsed_seconds": round(elapsed, 3),
-                "positions_response": redact_payload(positions),
             }
         except Exception as exc:
             clear_connection_state(clear_widgets=False)
@@ -687,10 +760,27 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
 
     st.markdown("#### Learning Guide")
     st.write(
-        "Tab 0 ยืนยันสองแหล่งพร้อมกัน: Webull แสดงว่ credential อ่านบัญชีได้ "
-        "และ Firestore ให้ DNA/trade documents ที่ Webull API ไม่มี ค่า secret "
-        "ไม่ถูกเพิ่มลง dataframe, audit หรือไฟล์ดาวน์โหลด"
+        "Tab 0 ยิง Webull SDK จริง 3–4 read endpoints: Account list, Balance, "
+        "Positions และ Market snapshot (เมื่อมี symbol) แล้วอ่าน Firestore จริง "
+        "DNA decoder ใช้ width/value → seed → mutation ตาม Shannon Demon Learning Guide "
+        "โดยไม่เขียน credential หรือ raw account response ลง Final CSV"
     )
+    source = Path(__file__).with_name("webull_lego_single_file.py").read_text(
+        encoding="utf-8"
+    )
+    with st.expander("Real All-in 0→18 — Single File", expanded=False):
+        st.caption(
+            "ไฟล์เดียวนี้มี Webull API reads, Firestore, DNA decode และ 17 transformations "
+            "ครบ; Production ก็อ่านจริงแต่ไม่มี place/cancel method"
+        )
+        st.code(source, language="python")
+        st.download_button(
+            "Download Real All-in Single File",
+            data=source,
+            file_name="webull_lego_single_file.py",
+            mime="text/x-python",
+            key="lego_download_all_in_auth",
+        )
 
 
 def render_final_tab(config: LegoDashboardConfig) -> None:
@@ -748,6 +838,119 @@ def render_final_tab(config: LegoDashboardConfig) -> None:
         )
 
 
+def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
+    """Real read-only Webull/Firestore Step 0 followed by Steps 1→18."""
+
+    with st.sidebar:
+        st.header("🧱 All-in Loop 0→18")
+        st.caption(
+            "ยิง Webull API + Firestore ใหม่จริง แล้วต่อ LEGO 17 ขั้นและ Final "
+            "ในคลิกเดียว ไม่ส่งหรือยกเลิก order"
+        )
+        settings: ConnectionSettings | None = st.session_state.get("lego_settings")
+        if settings is None:
+            st.warning("กรอก credential และกด Connect & Load ที่ Tab 0 ก่อน")
+        else:
+            st.info(
+                f"{settings.environment} · {settings.endpoint} · "
+                f"Production={'read-only' if settings.is_production else 'N/A'}"
+            )
+
+        status = st.session_state.get("lego_all_in_status")
+        if isinstance(status, dict):
+            if status.get("ok"):
+                st.success(
+                    f"ครบ 0→18 · {status.get('rows', 0)} rows · "
+                    f"{status.get('elapsed_seconds', 0):.3f}s"
+                )
+            else:
+                st.error(
+                    f"หยุดที่ Step {status.get('step', '?')}: "
+                    f"{status.get('error_type', 'Error')}"
+                )
+
+        run_clicked = st.button(
+            "Run ALL 0 → 18 (REAL READ)",
+            type="primary",
+            use_container_width=True,
+            disabled=settings is None,
+            key="lego_all_in_button",
+        )
+        if run_clicked and settings is not None:
+            started = time.perf_counter()
+            progress = st.progress(0.0, text="Step 0 · Webull + Firestore real reads")
+            current_step = 0
+            try:
+                dna_code = st.session_state.get("lego_dna_code", "")
+                symbol = st.session_state.get("lego_symbol", "")
+                raw, db, summary = authenticate_and_load(
+                    settings,
+                    config,
+                    symbol=symbol,
+                    dna_code=dna_code,
+                )
+                progress.progress(1 / 19, text="Step 0 สำเร็จ · authenticated real reads")
+
+                def update_progress(step: int) -> None:
+                    nonlocal current_step
+                    current_step = step
+                    label = "Final DataFrame" if step == 18 else STAGES[step - 1].title
+                    progress.progress(
+                        (step + 1) / 19,
+                        text=f"Step {step} สำเร็จ · {label}",
+                    )
+
+                results = run_all_pipeline_stages(
+                    raw,
+                    config,
+                    dna_code=dna_code,
+                    on_step=update_progress,
+                )
+                elapsed = time.perf_counter() - started
+                reference = st.session_state.get("lego_reference_csv")
+                st.session_state.lego_raw = raw
+                st.session_state.lego_db = db
+                st.session_state.lego_config = config
+                st.session_state.lego_results = results
+                st.session_state.lego_auth_summary = {
+                    **summary,
+                    "reference_csv_rows": (
+                        len(reference) if isinstance(reference, pd.DataFrame) else 0
+                    ),
+                    "all_in_completed_steps": list(range(19)),
+                }
+                st.session_state.lego_all_in_status = {
+                    "ok": True,
+                    "step": 18,
+                    "rows": len(raw),
+                    "elapsed_seconds": elapsed,
+                }
+                st.rerun()
+            except Exception as exc:
+                st.session_state.lego_results = {}
+                st.session_state.pop("lego_raw", None)
+                st.session_state.pop("lego_auth_summary", None)
+                st.session_state.lego_all_in_status = {
+                    "ok": False,
+                    "step": current_step,
+                    "error_type": exc.__class__.__name__,
+                }
+                st.error(f"{exc.__class__.__name__}: {exc}")
+
+        source = Path(__file__).with_name("webull_lego_single_file.py").read_text(
+            encoding="utf-8"
+        )
+        st.download_button(
+            "Download All-in Single File",
+            data=source,
+            file_name="webull_lego_single_file.py",
+            mime="text/x-python",
+            use_container_width=True,
+            key="lego_download_all_in_sidebar",
+        )
+        st.caption("ไฟล์เดียว · env credentials · Test/Production real reads · no mutation")
+
+
 if "lego_session_run_id" not in st.session_state:
     st.session_state.lego_session_run_id = uuid.uuid4().hex
 
@@ -782,3 +985,5 @@ for stage, tab in zip(STAGES, tabs[1:18]):
 
 with tabs[18]:
     render_final_tab(dashboard_config)
+
+render_all_in_sidebar(dashboard_config)

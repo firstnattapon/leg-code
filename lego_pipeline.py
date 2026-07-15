@@ -52,7 +52,7 @@ from trade_log import (
 # Increment when StageSpec/runtime metadata changes.  Streamlit may hot-reload
 # the app script while retaining an older imported module in ``sys.modules``;
 # lego_dashboard uses this handshake to reload the pipeline atomically.
-PIPELINE_SCHEMA_VERSION = 2
+PIPELINE_SCHEMA_VERSION = 3
 
 
 FINAL_COLUMNS: tuple[str, ...] = (
@@ -93,6 +93,7 @@ class PipelineContext:
 
     fix_c: float
     source_hash: str = ""
+    dna_code: str = ""
 
     def __post_init__(self) -> None:
         if not math.isfinite(float(self.fix_c)) or float(self.fix_c) <= 0:
@@ -558,7 +559,7 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec(2, FINAL_COLUMNS[1], "สินทรัพย์", "รับตารางจาก Step 1 แล้ว normalize symbol", "ใช้ชื่อสินทรัพย์ที่ log บันทึกจริงและแปลงเป็นตัวพิมพ์ใหญ่", block_02),
     StageSpec(3, FINAL_COLUMNS[2], "สถานะ", "เพิ่มสถานะ lifecycle จาก trade log", "สถานะบอกว่าเป็น PASS, pending, filled หรือ error โดยไม่สร้างสถานะใหม่", block_03),
     StageSpec(4, FINAL_COLUMNS[3], "DNA step", "ตรวจลำดับ DNA เป็นจำนวนเต็มไม่ติดลบ", "DNA step คือ index ของ signal ตามเวลา ค่าเสียไม่ควรถูกปัดให้ดูเหมือนถูก", block_04),
-    StageSpec(5, FINAL_COLUMNS[4], "DNA signal", "รับเฉพาะ signal 0 หรือ 1", "0 หมายถึงข้ามและ 1 หมายถึงเปิด gate ถัดไป ค่าอื่นถือว่าข้อมูลเสีย", block_05),
+    StageSpec(5, FINAL_COLUMNS[4], "DNA signal", "ใส่ DNA_CODE ที่ Tab 0; signal จาก log มาก่อน แล้ว decoder เติมช่องว่างตาม DNA step", "encoded DNA ใช้ width/value เพื่ออ่าน length, mutation rate และ seeds จากนั้นสร้าง base DNA ด้วย dna_seed และ flip bit ตาม mutation seed ทุกตัว; bypass:N/[1,N] ใช้เพื่อทดสอบเท่านั้น", block_05),
     StageSpec(6, FINAL_COLUMNS[5], "ราคา Pₙ", "เลือก quote บวกตัวแรกจาก field ที่รองรับ", "ราคานี้เป็น decision-time quote สำหรับตารางเรียนรู้ ไม่ใช่หลักฐานราคา fill", block_06),
     StageSpec(7, FINAL_COLUMNS[6], "จำนวนถือครอง", "เลือก holdings ที่ Webull Positions ยืนยัน", "ห้ามใช้ expected_position_after เพราะเป็นเพียงค่าคาดการณ์หลัง order", block_07),
     StageSpec(8, FINAL_COLUMNS[7], "คำสั่ง", "normalize BUY, SELL หรือ PASS", "คำสั่งมาจาก decision log และไม่ทำให้เกิด order เมื่อกด Run", block_08),
@@ -602,8 +603,14 @@ def run_stage(
         accumulated = previous.frame.copy()
         previous_hash = previous.output_hash
 
+    # DataFrame attrs carry run configuration without adding private columns to
+    # the user's raw data or the 17-column export.  Step 5 reads ``dna_code``
+    # from here when a logged DNA signal is missing; every other step ignores
+    # it.  The standalone Step 5 CLI sets the same attribute.
+    stage_raw = raw.copy(deep=False)
+    stage_raw.attrs["dna_code"] = context.dna_code.strip()
     series, diagnostics, provenance = spec.run_fn(
-        raw, accumulated, float(context.fix_c)
+        stage_raw, accumulated, float(context.fix_c)
     )
     if len(series) != len(raw):
         raise ValueError(f"stage {spec.number} returned the wrong number of rows")
@@ -615,6 +622,9 @@ def run_stage(
             "raw": context.source_hash or dataframe_fingerprint(raw),
             "previous": previous_hash,
             "fix_c": float(context.fix_c),
+            "dna_code_hash": hashlib.sha256(
+                context.dna_code.strip().encode("utf-8")
+            ).hexdigest(),
         },
         sort_keys=True,
     )

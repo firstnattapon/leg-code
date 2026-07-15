@@ -36,8 +36,8 @@
   </header>
 
   <div class="goalbar">
-    <b>🎯 Step 1 — เป้าหมาย:</b> สร้างแอปใหม่ 19 แท็บที่ผู้ใช้รัน 17 transformation
-    ตามลำดับ ได้ Final DataFrame ถูก contract พร้อม UAT safety, tests และคู่มือ deploy<br>
+    <b>🎯 Step 1 — เป้าหมาย:</b> สร้างแอป 19 แท็บที่รันทีละ LEGO หรือ All-in 0→18
+    โดยยิง Webull/Firestore จริง ถอด DNA seed+mutation ถูกหลัก และได้ Final DataFrame ถูก contract<br>
     <span class="metric">ตัวชี้วัด: end-to-end acceptance ratio</span>
     <span class="metric">ปัจจุบัน: 0 ratio</span><span class="metric">เป้า: 1 ratio</span>
     <span class="metric">ระยะเวลา: ก่อน deploy ครั้งแรก</span>
@@ -88,6 +88,7 @@
       <tr><td>1</td><td>สร้าง JSON plan และ offline HTML</td><td>Codex</td><td>—</td></tr>
       <tr><td>1–2</td><td>สร้าง pipeline registry และ dual ledger</td><td>Codex</td><td>S1, S3</td></tr>
       <tr><td>2–3</td><td>สร้าง 17 Single-File LEGO blocks พร้อม Goal, Quick Start และ CLI</td><td>Codex</td><td>S1, S2</td></tr>
+      <tr><td>2–4</td><td>สร้าง real read-only All-in Single File + sidebar loop 0→18</td><td>Codex</td><td>S1, S2, S4</td></tr>
       <tr><td>2–3</td><td>สร้าง 19-tab Streamlit state machine</td><td>Codex</td><td>S2</td></tr>
       <tr><td>3–4</td><td>เชื่อม Webull, Firestore, UAT audit</td><td>Codex</td><td>S4</td></tr>
       <tr><td>4–5</td><td>เพิ่ม tests, README, Cloud checklist</td><td>Codex</td><td>S5</td></tr>
@@ -117,6 +118,8 @@
   <section class="step"><h2>กติกาที่ล็อกแล้ว</h2>
     <div class="card">19 tabs: Auth → 17 manual blocks → Final DataFrame</div>
     <div class="card">ทุก block เป็น Python Single File: มี Goal, Quick Start, validation และ CLI ในตัว</div>
+    <div class="card">All-in ยิง Account list, Balance, Positions, Quote และ Firestore จริงทั้ง Test/Production</div>
+    <div class="card">DNA encoded ใช้ width/value → base seed → mutation seeds; logged signal มีสิทธิ์ก่อน</div>
     <div class="card">Production ไม่มี mutation path; UAT ใช้ Preview และ confirmation แยก</div>
     <div class="card">Firebase credentials อยู่ใน Streamlit secrets และแอปต้อง private</div>
     <div class="card">Final หลักเป็น broker-confirmed; what-if แสดงเป็นคนละ data product</div>

@@ -3,7 +3,7 @@
   "language": "th",
   "step_1_goals": {
     "raw_goal": "สร้าง Streamlit app แบบ LEGO chain สำหรับ Webull dataframe",
-    "refined_goal": "สร้างแอปใหม่ 19 แท็บที่ผู้ใช้รัน 17 transformation ตามลำดับ โดยแต่ละ LEGO block เป็น Single File มี Goal และ Quick Start ในตัว ได้ Final DataFrame ถูก contract พร้อม UAT safety, tests และ Streamlit Cloud deployment guide",
+    "refined_goal": "สร้างแอป 19 แท็บที่รันทีละ LEGO หรือ All-in 0→18 ได้ มี Single File ที่ยิง Webull API/Firestore จริงทั้ง Test และ Production, ถอด DNA seed+mutation ถูกหลัก, ได้ Final DataFrame ถูก contract พร้อม UAT safety และคู่มือมือใหม่",
     "target_metric": {
       "name": "end-to-end acceptance ratio",
       "current": 0,
@@ -14,6 +14,8 @@
     "success_criteria": [
       "17/17 stages รันและส่งต่อสำเร็จ",
       "ทุก LEGO block มี Goal และ Quick Start และรันเป็น Python file เดี่ยวได้",
+      "All-in sidebar ยิง Webull Account/Balance/Positions/Quote และ Firestore จริงก่อนรัน 1→18",
+      "encoded DNA, bypass:N และ [1,N] ถอดได้ตรง Learning Guide โดย logged signal มีสิทธิ์ก่อน",
       "Final DataFrame มี 17 คอลัมน์ตรง contract",
       "broker ledger และ what-if ไม่ปะปนกัน",
       "credentials ไม่ถูก persist และ tests ผ่าน 100%"
@@ -71,6 +73,7 @@
       {"action": "สร้าง plan JSON และ offline HTML guide", "owner": "Codex", "start": "Phase 1", "end": "Phase 1", "depends_on": []},
       {"action": "สร้าง pipeline registry และ dual-ledger contract", "owner": "Codex", "start": "Phase 1", "end": "Phase 2", "depends_on": ["S1", "S3"]},
       {"action": "สร้าง 17 Single-File LEGO blocks ที่มี Goal, Quick Start และ CLI", "owner": "Codex", "start": "Phase 2", "end": "Phase 3", "depends_on": ["S1", "S2"]},
+      {"action": "สร้าง real read-only All-in Single File และ sidebar loop 0→18", "owner": "Codex", "start": "Phase 2", "end": "Phase 4", "depends_on": ["S1", "S2", "S4"]},
       {"action": "สร้าง 19-tab Streamlit state machine", "owner": "Codex", "start": "Phase 2", "end": "Phase 3", "depends_on": ["S2"]},
       {"action": "เชื่อม Webull, Firestore และ UAT audit", "owner": "Codex", "start": "Phase 3", "end": "Phase 4", "depends_on": ["S4"]},
       {"action": "เพิ่ม tests, README และ Cloud checklist", "owner": "Codex", "start": "Phase 4", "end": "Phase 5", "depends_on": ["S5"]}
@@ -108,6 +111,6 @@
     "Production ไม่มี mutation path",
     "Firebase credentials มาจาก Streamlit secrets",
     "แอปจำกัดเป็น private single-user",
-    "ไม่ publish หรือ deploy โดยอัตโนมัติ"
+    "เผยแพร่ source เฉพาะ repository ที่ผู้ใช้ยืนยัน; ไม่ deploy โดยอัตโนมัติ"
   ]
 }

@@ -27,6 +27,12 @@ python -m venv .venv
 ยืนยัน Webull + Firestore ที่ Tab 0 แล้วกด Run เองทีละ Step 1–17 ก่อนเปิด Final
 DataFrame ที่ Tab 18
 
+- [LEARNING_GUIDE.md](LEARNING_GUIDE.md) อธิบาย DNA seed+mutation, API จริง และ ledger
+- Sidebar `Run ALL 0 → 18 (REAL READ)` ยิง Account/Balance/Positions/Quote + Firestore
+  ใหม่จริง แล้วต่อครบทุกขั้นในคลิกเดียว
+- [webull_lego_single_file.py](webull_lego_single_file.py) เป็นไฟล์เดียวที่รัน 0→18
+  ได้โดยไม่ import โมดูลในโปรเจกต์ และรองรับ Test/Production read-only
+
 ```bash
 .venv/Scripts/python -m streamlit run lego_dashboard.py
 ```

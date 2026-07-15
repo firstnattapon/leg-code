@@ -87,6 +87,30 @@ def test_registry_has_exactly_17_ordered_columns():
         compile(source, stage.file_name, "exec")
 
 
+def test_pipeline_dna_decoder_fills_only_truly_missing_logged_signals():
+    prepared = prepare_raw_frame(
+        pd.DataFrame(
+            [
+                {"dna_step": 0, "dna_signal": 0},
+                {"dna_step": 1},
+                {"dna_step": 1, "dna_signal": 2},
+                {"dna_step": 8},
+            ]
+        )
+    )
+    context = PipelineContext(fix_c=1500.0, dna_code="bypass:2")
+    previous = None
+    for step in range(1, 6):
+        previous = run_stage(step, prepared, previous, context)
+
+    values = previous.frame["DNA signal"].tolist()
+    assert values[:2] == [0, 1]
+    assert pd.isna(values[2])  # invalid logged data is rejected, never overwritten
+    assert pd.isna(values[3])  # decoded sequence has no step 8
+    assert previous.provenance["decoder"]["mode"] == "bypass"
+    assert previous.provenance["dna_code_stored"] is False
+
+
 def test_all_17_single_files_run_as_a_complete_cli_chain(tmp_path):
     prepared = prepare_raw_frame(sample_rows())
     raw_path = tmp_path / "raw.csv"

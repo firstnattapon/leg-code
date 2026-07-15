@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 import lego_pipeline
 from lego_pipeline import prepare_raw_frame
+from manual_tools import ConnectionSettings
 
 
 def test_lego_dashboard_loads_without_secrets_and_has_19_tabs():
@@ -42,6 +43,9 @@ def test_all_17_run_buttons_are_disabled_before_authentication():
     ]
     assert len(run_buttons) == 17
     assert all(button.disabled for button in run_buttons)
+
+    all_in = next(button for button in app.button if button.label.startswith("Run ALL"))
+    assert all_in.disabled
 
 
 def test_first_run_unlocks_only_the_next_lego_stage():
@@ -104,6 +108,31 @@ def test_production_mutations_are_guarded_in_source():
     assert 'action="PREVIEW"' in source
     assert 'action="SUBMIT"' in source
     assert 'action="CANCEL"' in source
+
+
+def test_sidebar_exposes_real_read_only_all_in_single_file():
+    source = Path("lego_dashboard.py").read_text(encoding="utf-8")
+    single_file = Path("webull_lego_single_file.py").read_text(encoding="utf-8")
+
+    assert "All-in Loop 0→18" in source
+    assert "Run ALL 0 → 18 (REAL READ)" in source
+    assert "authenticate_and_load" in source
+    assert "load_live_inputs" in source
+    assert "run_all_pipeline_stages" in source
+    assert "Production" in single_file
+    assert "WebullReadOnlyClient" in single_file
+
+
+def test_sidebar_all_in_unlocks_after_authenticated_session():
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_settings"] = ConnectionSettings(
+        "Production", "account", "key", "secret"
+    )
+    app.run(timeout=30)
+
+    all_in = next(button for button in app.button if button.label.startswith("Run ALL"))
+    assert not all_in.disabled
+    assert any("Production" in item.value for item in app.info)
 
 
 def test_five_step_artifacts_are_machine_readable_and_offline():
