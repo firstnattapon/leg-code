@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
+import lego_pipeline
 from lego_pipeline import prepare_raw_frame
 
 
@@ -19,6 +20,18 @@ def test_lego_dashboard_loads_without_secrets_and_has_19_tabs():
     assert app.tabs[-1].label == "18 · Final DataFrame"
     assert app.selectbox[0].value == "Test (UAT)"
     assert [field.value for field in app.text_input[:3]] == ["", "", ""]
+
+
+def test_hot_reload_recovers_a_stale_pipeline_stage_contract(monkeypatch):
+    """Reproduce Cloud loading the new app while retaining old StageSpec."""
+
+    monkeypatch.delattr(lego_pipeline.StageSpec, "goal")
+    monkeypatch.setattr(lego_pipeline, "PIPELINE_SCHEMA_VERSION", 1)
+
+    app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
+
+    assert not app.exception
+    assert any(item.value.startswith("**Goal:**") for item in app.markdown)
 
 
 def test_all_17_run_buttons_are_disabled_before_authentication():

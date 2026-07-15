@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import importlib
 import json
 import time
 import uuid
@@ -13,6 +14,19 @@ import pandas as pd
 import streamlit as st
 from google.cloud import firestore
 from google.oauth2 import service_account
+
+# Streamlit Cloud can hot-reload this entry point without evicting an older
+# lego_pipeline module.  Reload it before importing names when the StageSpec
+# contract is stale, so ``stage.goal/source_code/file_name`` always move as one
+# compatible unit.
+import lego_pipeline as _lego_pipeline
+
+EXPECTED_PIPELINE_SCHEMA_VERSION = 2
+if (
+    getattr(_lego_pipeline, "PIPELINE_SCHEMA_VERSION", 0)
+    != EXPECTED_PIPELINE_SCHEMA_VERSION
+):
+    _lego_pipeline = importlib.reload(_lego_pipeline)
 
 from lego_pipeline import (
     FINAL_COLUMNS,

@@ -49,6 +49,12 @@ from trade_log import (
 )
 
 
+# Increment when StageSpec/runtime metadata changes.  Streamlit may hot-reload
+# the app script while retaining an older imported module in ``sys.modules``;
+# lego_dashboard uses this handshake to reload the pipeline atomically.
+PIPELINE_SCHEMA_VERSION = 2
+
+
 FINAL_COLUMNS: tuple[str, ...] = (
     "เวลา (UTC)",
     "สินทรัพย์",
