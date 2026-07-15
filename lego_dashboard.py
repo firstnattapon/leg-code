@@ -636,31 +636,31 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
     )
     st.code(WEBULL_ENDPOINTS[environment], language=None)
     account_id = st.text_input(
-        "Account ID", value="", key="lego_account_id", autocomplete="off"
+        "Account ID", value="1251161573554425856", key="lego_account_id", autocomplete="off"
     )
     app_key = st.text_input(
         "App Key",
-        value="",
+        value="c12c25c93f98169ad56f5148e4edfd16",
         type="password",
         key="lego_app_key",
         autocomplete="off",
     )
     app_secret = st.text_input(
         "App Secret",
-        value="",
+        value="f3ac0da97d2085ad4ce14b961cbd8824",
         type="password",
         key="lego_app_secret",
         autocomplete="off",
     )
     symbol = st.text_input(
         "Symbol สำหรับ Webull quote (optional)",
-        value="",
+        value="EOSE",
         key="lego_symbol_input",
         help="ถ้าเว้นว่าง จะใช้ symbol แรกจาก Firestore trade log",
     ).strip().upper()
     dna_code = st.text_input(
         "DNA_CODE (encoded, bypass:N หรือ [1,N])",
-        value="",
+        value="bypass:100",
         key="lego_dna_code_input",
         help="signal ที่บอท log ไว้มีสิทธิ์ก่อน; decoder เติมเฉพาะ signal ที่หายไป",
     ).strip()
