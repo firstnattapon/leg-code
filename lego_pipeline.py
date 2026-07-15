@@ -1,9 +1,10 @@
 """Pure, sequential LEGO transformations for the Webull learning dashboard.
 
 The module deliberately contains no Streamlit, Webull, or Firestore calls.  Each
-``StageSpec`` points at the exact trusted Python function that the UI prints and
-executes.  Raw broker documents remain separate from the accumulated 17-column
-learning dataframe so secrets and unreviewed fields can never leak into exports.
+``StageSpec`` points at ``transform`` in a complete, standalone Python file; the
+UI prints that entire trusted file and executes the same callable.  Raw broker
+documents remain separate from the accumulated 17-column learning dataframe so
+secrets and unreviewed fields can never leak into exports.
 """
 
 from __future__ import annotations
@@ -14,10 +15,29 @@ import hashlib
 import inspect
 import json
 import math
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 import numpy as np
 import pandas as pd
+
+from lego_blocks.step_01_time_utc import transform as block_01
+from lego_blocks.step_02_asset import transform as block_02
+from lego_blocks.step_03_status import transform as block_03
+from lego_blocks.step_04_dna_step import transform as block_04
+from lego_blocks.step_05_dna_signal import transform as block_05
+from lego_blocks.step_06_price import transform as block_06
+from lego_blocks.step_07_holdings import transform as block_07
+from lego_blocks.step_08_action import transform as block_08
+from lego_blocks.step_09_side import transform as block_09
+from lego_blocks.step_10_reason import transform as block_10
+from lego_blocks.step_11_order_quantity import transform as block_11
+from lego_blocks.step_12_portfolio_value import transform as block_12
+from lego_blocks.step_13_target_gap import transform as block_13
+from lego_blocks.step_14_reference import transform as block_14
+from lego_blocks.step_15_delta_actual import transform as block_15
+from lego_blocks.step_16_actual_cumulative import transform as block_16
+from lego_blocks.step_17_excess import transform as block_17
 
 from trade_log import (
     EXECUTION_PRICE_COLUMNS,
@@ -82,7 +102,10 @@ class StageValue:
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
-StageFunction = Callable[[pd.DataFrame, pd.DataFrame, PipelineContext], StageValue]
+StageFunction = Callable[
+    [pd.DataFrame, pd.DataFrame, float],
+    tuple[pd.Series, tuple[str, ...], dict[str, Any]],
+]
 
 
 @dataclass(frozen=True)
@@ -96,9 +119,31 @@ class StageSpec:
 
     @property
     def source_code(self) -> str:
-        """Return the exact trusted function body used by the Run button."""
+        """Return the complete standalone file containing the executed callable."""
 
-        return inspect.getsource(self.run_fn)
+        source_path = inspect.getsourcefile(self.run_fn)
+        if source_path is None:
+            raise RuntimeError(f"cannot locate source file for LEGO Step {self.number}")
+        return Path(source_path).read_text(encoding="utf-8")
+
+    @property
+    def goal(self) -> str:
+        """Return the goal embedded in the same standalone runtime file."""
+
+        module = inspect.getmodule(self.run_fn)
+        goal = getattr(module, "GOAL", "") if module is not None else ""
+        if not goal:
+            raise RuntimeError(f"LEGO Step {self.number} has no embedded GOAL")
+        return str(goal)
+
+    @property
+    def file_name(self) -> str:
+        """Return a portable filename for downloading/running this block."""
+
+        source_path = inspect.getsourcefile(self.run_fn)
+        if source_path is None:
+            raise RuntimeError(f"cannot locate source file for LEGO Step {self.number}")
+        return Path(source_path).name
 
 
 @dataclass
@@ -503,23 +548,23 @@ def _stage_excess(
 
 
 STAGES: tuple[StageSpec, ...] = (
-    StageSpec(1, FINAL_COLUMNS[0], "เวลา UTC", "อ่าน created_at แล้วกด Run เพื่อสร้างเวลา UTC", "แปลงเวลาให้มี timezone ชัดเจน ค่าเสียจะเว้นว่างแทนการเดา", _stage_time),
-    StageSpec(2, FINAL_COLUMNS[1], "สินทรัพย์", "รับตารางจาก Step 1 แล้ว normalize symbol", "ใช้ชื่อสินทรัพย์ที่ log บันทึกจริงและแปลงเป็นตัวพิมพ์ใหญ่", _stage_asset),
-    StageSpec(3, FINAL_COLUMNS[2], "สถานะ", "เพิ่มสถานะ lifecycle จาก trade log", "สถานะบอกว่าเป็น PASS, pending, filled หรือ error โดยไม่สร้างสถานะใหม่", _stage_status),
-    StageSpec(4, FINAL_COLUMNS[3], "DNA step", "ตรวจลำดับ DNA เป็นจำนวนเต็มไม่ติดลบ", "DNA step คือ index ของ signal ตามเวลา ค่าเสียไม่ควรถูกปัดให้ดูเหมือนถูก", _stage_dna_step),
-    StageSpec(5, FINAL_COLUMNS[4], "DNA signal", "รับเฉพาะ signal 0 หรือ 1", "0 หมายถึงข้ามและ 1 หมายถึงเปิด gate ถัดไป ค่าอื่นถือว่าข้อมูลเสีย", _stage_dna_signal),
-    StageSpec(6, FINAL_COLUMNS[5], "ราคา Pₙ", "เลือก quote บวกตัวแรกจาก field ที่รองรับ", "ราคานี้เป็น decision-time quote สำหรับตารางเรียนรู้ ไม่ใช่หลักฐานราคา fill", _stage_price),
-    StageSpec(7, FINAL_COLUMNS[6], "จำนวนถือครอง", "เลือก holdings ที่ Webull Positions ยืนยัน", "ห้ามใช้ expected_position_after เพราะเป็นเพียงค่าคาดการณ์หลัง order", _stage_holdings),
-    StageSpec(8, FINAL_COLUMNS[7], "คำสั่ง", "normalize BUY, SELL หรือ PASS", "คำสั่งมาจาก decision log และไม่ทำให้เกิด order เมื่อกด Run", _stage_action),
-    StageSpec(9, FINAL_COLUMNS[8], "ฝั่ง", "แยก BUY/SELL side จากคำสั่ง", "PASS ไม่มีฝั่งจึงเว้นว่างอย่างตั้งใจ", _stage_side),
-    StageSpec(10, FINAL_COLUMNS[9], "เหตุผล", "ส่งเหตุผลของ decision ต่อไป", "เหตุผลช่วยอธิบายว่าต่ำกว่าเป้า สูงกว่าเป้า หรืออยู่ใน threshold", _stage_reason),
-    StageSpec(11, FINAL_COLUMNS[10], "จำนวนสั่ง", "ตรวจ order quantity ก่อนเปิด UAT panel", "Run สร้างคอลัมน์เท่านั้น การ preview/place/cancel ใช้ปุ่มแยก", _stage_order_quantity),
-    StageSpec(12, FINAL_COLUMNS[11], "มูลค่าพอร์ต", "ใช้ logged value หรือ fallback quantity×price", "ค่าจาก decision-time log มาก่อน เพื่อไม่เอา post-fill holdings ไปคูณย้อนหลัง", _stage_portfolio_value),
-    StageSpec(13, FINAL_COLUMNS[12], "ส่วนต่างเป้าหมาย", "คำนวณ FIX_C − มูลค่าพอร์ต", "ค่าบวกหมายถึงควรเพิ่มเงินซื้อ ค่าลบหมายถึงควรขายออก", _stage_target_gap),
-    StageSpec(14, FINAL_COLUMNS[13], "Rₙ อ้างอิง", "ใช้ execution price ที่ยืนยันแล้วเท่านั้น", "Rₙ หลักเป็น execution reference; what-if quote reference แสดงแยกที่ Final", _stage_reference),
-    StageSpec(15, FINAL_COLUMNS[14], "ΔAₙ ต่อสเต็ป", "นับ incremental filled notional เพียงครั้งเดียว", "SELL เป็นเงินรับบวก BUY เป็นเงินจ่ายลบ และหัก fee เมื่อ log มีข้อมูล", _stage_delta_actual),
-    StageSpec(16, FINAL_COLUMNS[15], "Aₙ สะสม", "สะสมเงินจริงตามเวลาเก่าไปใหม่", "pending, rejected และ unfilled ไม่ขยับยอดเงินจริง", _stage_actual_cumulative),
-    StageSpec(17, FINAL_COLUMNS[16], "Eₙ ส่วนเกินสะสม", "คำนวณ Eₙ = Aₙ − Rₙ", "จะแสดงเฉพาะเมื่อ Aₙ และ Rₙ มาจาก broker-confirmed execution contract", _stage_excess),
+    StageSpec(1, FINAL_COLUMNS[0], "เวลา UTC", "อ่าน created_at แล้วกด Run เพื่อสร้างเวลา UTC", "แปลงเวลาให้มี timezone ชัดเจน ค่าเสียจะเว้นว่างแทนการเดา", block_01),
+    StageSpec(2, FINAL_COLUMNS[1], "สินทรัพย์", "รับตารางจาก Step 1 แล้ว normalize symbol", "ใช้ชื่อสินทรัพย์ที่ log บันทึกจริงและแปลงเป็นตัวพิมพ์ใหญ่", block_02),
+    StageSpec(3, FINAL_COLUMNS[2], "สถานะ", "เพิ่มสถานะ lifecycle จาก trade log", "สถานะบอกว่าเป็น PASS, pending, filled หรือ error โดยไม่สร้างสถานะใหม่", block_03),
+    StageSpec(4, FINAL_COLUMNS[3], "DNA step", "ตรวจลำดับ DNA เป็นจำนวนเต็มไม่ติดลบ", "DNA step คือ index ของ signal ตามเวลา ค่าเสียไม่ควรถูกปัดให้ดูเหมือนถูก", block_04),
+    StageSpec(5, FINAL_COLUMNS[4], "DNA signal", "รับเฉพาะ signal 0 หรือ 1", "0 หมายถึงข้ามและ 1 หมายถึงเปิด gate ถัดไป ค่าอื่นถือว่าข้อมูลเสีย", block_05),
+    StageSpec(6, FINAL_COLUMNS[5], "ราคา Pₙ", "เลือก quote บวกตัวแรกจาก field ที่รองรับ", "ราคานี้เป็น decision-time quote สำหรับตารางเรียนรู้ ไม่ใช่หลักฐานราคา fill", block_06),
+    StageSpec(7, FINAL_COLUMNS[6], "จำนวนถือครอง", "เลือก holdings ที่ Webull Positions ยืนยัน", "ห้ามใช้ expected_position_after เพราะเป็นเพียงค่าคาดการณ์หลัง order", block_07),
+    StageSpec(8, FINAL_COLUMNS[7], "คำสั่ง", "normalize BUY, SELL หรือ PASS", "คำสั่งมาจาก decision log และไม่ทำให้เกิด order เมื่อกด Run", block_08),
+    StageSpec(9, FINAL_COLUMNS[8], "ฝั่ง", "แยก BUY/SELL side จากคำสั่ง", "PASS ไม่มีฝั่งจึงเว้นว่างอย่างตั้งใจ", block_09),
+    StageSpec(10, FINAL_COLUMNS[9], "เหตุผล", "ส่งเหตุผลของ decision ต่อไป", "เหตุผลช่วยอธิบายว่าต่ำกว่าเป้า สูงกว่าเป้า หรืออยู่ใน threshold", block_10),
+    StageSpec(11, FINAL_COLUMNS[10], "จำนวนสั่ง", "ตรวจ order quantity ก่อนเปิด UAT panel", "Run สร้างคอลัมน์เท่านั้น การ preview/place/cancel ใช้ปุ่มแยก", block_11),
+    StageSpec(12, FINAL_COLUMNS[11], "มูลค่าพอร์ต", "ใช้ logged value หรือ fallback quantity×price", "ค่าจาก decision-time log มาก่อน เพื่อไม่เอา post-fill holdings ไปคูณย้อนหลัง", block_12),
+    StageSpec(13, FINAL_COLUMNS[12], "ส่วนต่างเป้าหมาย", "คำนวณ FIX_C − มูลค่าพอร์ต", "ค่าบวกหมายถึงควรเพิ่มเงินซื้อ ค่าลบหมายถึงควรขายออก", block_13),
+    StageSpec(14, FINAL_COLUMNS[13], "Rₙ อ้างอิง", "ใช้ execution price ที่ยืนยันแล้วเท่านั้น", "Rₙ หลักเป็น execution reference; what-if quote reference แสดงแยกที่ Final", block_14),
+    StageSpec(15, FINAL_COLUMNS[14], "ΔAₙ ต่อสเต็ป", "นับ incremental filled notional เพียงครั้งเดียว", "SELL เป็นเงินรับบวก BUY เป็นเงินจ่ายลบ และหัก fee เมื่อ log มีข้อมูล", block_15),
+    StageSpec(16, FINAL_COLUMNS[15], "Aₙ สะสม", "สะสมเงินจริงตามเวลาเก่าไปใหม่", "pending, rejected และ unfilled ไม่ขยับยอดเงินจริง", block_16),
+    StageSpec(17, FINAL_COLUMNS[16], "Eₙ ส่วนเกินสะสม", "คำนวณ Eₙ = Aₙ − Rₙ", "จะแสดงเฉพาะเมื่อ Aₙ และ Rₙ มาจาก broker-confirmed execution contract", block_17),
 )
 
 STAGE_BY_NUMBER = {stage.number: stage for stage in STAGES}
@@ -551,10 +596,12 @@ def run_stage(
         accumulated = previous.frame.copy()
         previous_hash = previous.output_hash
 
-    value = spec.run_fn(raw, accumulated, context)
-    if len(value.series) != len(raw):
+    series, diagnostics, provenance = spec.run_fn(
+        raw, accumulated, float(context.fix_c)
+    )
+    if len(series) != len(raw):
         raise ValueError(f"stage {spec.number} returned the wrong number of rows")
-    accumulated[spec.column_name] = value.series.to_numpy()
+    accumulated[spec.column_name] = series.to_numpy()
 
     input_payload = json.dumps(
         {
@@ -570,8 +617,8 @@ def run_stage(
     return StageResult(
         stage_number=spec.number,
         frame=accumulated,
-        diagnostics=value.diagnostics,
-        provenance=value.provenance,
+        diagnostics=tuple(diagnostics),
+        provenance=dict(provenance),
         input_hash=input_hash,
         output_hash=output_hash,
         completed_at=datetime.now(timezone.utc).isoformat(),

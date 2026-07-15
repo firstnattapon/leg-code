@@ -455,10 +455,23 @@ def render_uat_panel(stage_result: StageResult) -> None:
 
 
 def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
+    source_code = stage.source_code
     st.subheader(f"Step {stage.number} — {stage.title}")
+    st.markdown(f"**Goal:** {stage.goal}")
     st.info(f"Quick Start: {stage.quick_start}")
-    st.markdown("#### LEGO code block ที่จะรัน")
-    st.code(stage.source_code, language="python")
+    st.markdown("#### LEGO code block ที่จะรัน — Single File")
+    st.caption(
+        f"{stage.file_name} · คัดลอกหรือดาวน์โหลดไฟล์เดียวแล้วรันได้ · "
+        "ฟังก์ชัน transform ในไฟล์นี้คือ callable เดียวกับปุ่ม Run"
+    )
+    st.code(source_code, language="python")
+    st.download_button(
+        "Download Single-File LEGO Block",
+        data=source_code,
+        file_name=stage.file_name,
+        mime="text/x-python",
+        key=f"lego_download_stage_{stage.number}",
+    )
 
     raw: pd.DataFrame | None = st.session_state.get("lego_raw")
     results: dict[int, StageResult] = st.session_state.setdefault("lego_results", {})

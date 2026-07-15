@@ -31,9 +31,14 @@ DataFrame ที่ Tab 18
 .venv/Scripts/python -m streamlit run lego_dashboard.py
 ```
 
-ลำดับของแต่ละแท็บเหมือน LEGO block: แสดง source ของฟังก์ชันจริง → Run → validate
-→ แสดง accumulated DataFrame → ส่งต่อขั้นถัดไป → อ่าน Learning Guide โดยไม่มี
-`exec` หรือโค้ดที่สร้างจากข้อความผู้ใช้
+ลำดับของแต่ละแท็บเหมือน LEGO block: Goal → Quick Start → แสดง **Single-File
+Python source** → Run → validate → แสดง accumulated DataFrame → ส่งต่อขั้นถัดไป
+→ อ่าน Learning Guide โดยไม่มี `exec` หรือโค้ดที่สร้างจากข้อความผู้ใช้
+
+Block 1–17 อยู่ใน `lego_blocks/step_*.py` แต่ละไฟล์จบในตัวเองและไม่ import โมดูล
+ภายในโปรเจกต์ ผู้ใช้กด **Download Single-File LEGO Block** แล้วรัน CLI ตามคำสั่ง
+Quick Start ที่อยู่ใน docstring บนสุดได้ทันที ฟังก์ชัน `transform` ในไฟล์ที่แสดงคือ
+callable เดียวกับที่ปุ่ม Run ของ Streamlit เรียก จึงไม่มีโค้ดตัวอย่างคนละชุดกับโค้ดจริง
 
 Final DataFrame มี 17 คอลัมน์ตาม contract และแยกข้อมูลเงินสองชนิดออกจากกัน:
 

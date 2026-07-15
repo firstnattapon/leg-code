@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 
 import pandas as pd
 
@@ -71,7 +73,56 @@ def test_registry_has_exactly_17_ordered_columns():
     assert len(STAGES) == 17
     assert tuple(stage.number for stage in STAGES) == tuple(range(1, 18))
     assert tuple(stage.column_name for stage in STAGES) == FINAL_COLUMNS
-    assert all(stage.source_code.startswith("def _stage_") for stage in STAGES)
+    for stage in STAGES:
+        source = stage.source_code
+        assert source.startswith('"""Goal:')
+        assert "Quick Start:" in source
+        assert "def transform(" in source
+        assert 'if __name__ == "__main__":' in source
+        assert stage.goal in source
+        assert stage.file_name.startswith(f"step_{stage.number:02d}_")
+        assert stage.run_fn.__module__.startswith("lego_blocks.step_")
+        assert "from lego_" not in source
+        assert "from trade_log" not in source
+        compile(source, stage.file_name, "exec")
+
+
+def test_all_17_single_files_run_as_a_complete_cli_chain(tmp_path):
+    prepared = prepare_raw_frame(sample_rows())
+    raw_path = tmp_path / "raw.csv"
+    prepared.to_csv(raw_path, index=False)
+    previous_path = None
+
+    for stage in STAGES:
+        script_path = tmp_path / stage.file_name
+        output_path = tmp_path / f"step_{stage.number:02d}.csv"
+        script_path.write_text(stage.source_code, encoding="utf-8")
+        command = [
+            sys.executable,
+            str(script_path),
+            "--raw",
+            str(raw_path),
+            "--output",
+            str(output_path),
+        ]
+        if previous_path is not None:
+            command.extend(["--previous", str(previous_path)])
+        completed = subprocess.run(
+            command,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert '"goal":' in completed.stdout
+        previous_path = output_path
+
+    standalone_final = pd.read_csv(previous_path)
+    assert tuple(standalone_final.columns) == FINAL_COLUMNS
+    assert len(standalone_final) == len(prepared)
 
 
 def test_full_chain_returns_exact_newest_first_contract():
