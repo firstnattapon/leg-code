@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Cheat sheet แบบโต้ตอบสำหรับ Logical FIX_C และสมการ Aₙ/Rₙ/Eₙ">
+  <title>Cheat Sheet — รู้ทันสมการ Rebalancing</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f7fb;
+      --surface: #ffffff;
+      --surface-2: #edf3f9;
+      --ink: #172033;
+      --muted: #58667a;
+      --line: #d4deea;
+      --blue: #1769e0;
+      --blue-soft: #e8f1ff;
+      --green: #087a55;
+      --green-soft: #e2f7ef;
+      --red: #bd2c43;
+      --red-soft: #fde9ed;
+      --amber: #9a6500;
+      --amber-soft: #fff4d6;
+      --shadow: 0 12px 32px rgba(31, 48, 76, 0.08);
+      --radius: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1422;
+        --surface: #151f31;
+        --surface-2: #1b2940;
+        --ink: #eef4ff;
+        --muted: #aab8ca;
+        --line: #34445d;
+        --blue: #78adff;
+        --blue-soft: #172e50;
+        --green: #62d8ad;
+        --green-soft: #163a32;
+        --red: #ff8da1;
+        --red-soft: #4a202b;
+        --amber: #ffd071;
+        --amber-soft: #493a19;
+        --shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% 0%, var(--blue-soft), transparent 30rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    button, input, textarea { font: inherit; }
+
+    button, input, textarea, .card { transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+
+    :focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--blue) 55%, transparent);
+      outline-offset: 2px;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 28px));
+      margin: 0 auto;
+      padding: 28px 0 52px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.45fr 0.85fr;
+      gap: 22px;
+      align-items: stretch;
+      margin-bottom: 22px;
+    }
+
+    .hero-main, .one-minute, .card, .guardrail {
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-main { padding: clamp(24px, 4vw, 42px); }
+    .one-minute { padding: 24px; }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--blue);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 10px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1.06; letter-spacing: -0.045em; }
+    h2 { margin-bottom: 8px; font-size: clamp(1.35rem, 2.5vw, 2rem); letter-spacing: -0.025em; }
+    h3 { margin-bottom: 8px; font-size: 1.02rem; }
+
+    .lede { max-width: 64ch; margin-bottom: 0; color: var(--muted); font-size: 1.04rem; }
+    .one-minute ol { margin: 14px 0 0; padding-left: 1.25rem; }
+    .one-minute li + li { margin-top: 8px; }
+
+    code, .formula, .metric-value {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .formula-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0 0 22px;
+    }
+
+    .formula {
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-2);
+      overflow-wrap: anywhere;
+    }
+
+    .formula small { display: block; margin-top: 4px; color: var(--muted); font-family: system-ui, sans-serif; }
+
+    .calculators {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+      align-items: start;
+    }
+
+    .card { padding: clamp(18px, 3vw, 28px); }
+    .card-header { margin-bottom: 18px; }
+    .card-header p { margin-bottom: 0; color: var(--muted); }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 0.86rem; font-weight: 700; }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--ink);
+      padding: 10px 12px;
+    }
+
+    textarea { min-height: 76px; resize: vertical; }
+    input:hover, textarea:hover { border-color: var(--blue); }
+
+    .actions, .presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    button {
+      min-height: 42px;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 14px;
+      background: var(--surface-2);
+      color: var(--ink);
+      font-weight: 750;
+    }
+
+    button:hover { border-color: var(--blue); transform: translateY(-1px); }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+    .error {
+      min-height: 1.5em;
+      margin: 10px 0 0;
+      color: var(--red);
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
+    .result {
+      margin-top: 18px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-2);
+    }
+
+    .result-top { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-width: 76px;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+    }
+
+    .badge.buy { color: var(--green); background: var(--green-soft); }
+    .badge.sell { color: var(--red); background: var(--red-soft); }
+    .badge.pass { color: var(--amber); background: var(--amber-soft); }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .path-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .metric {
+      min-width: 0;
+      padding: 10px;
+      border-radius: 10px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+    }
+
+    .metric-label { display: block; color: var(--muted); font-size: 0.74rem; font-weight: 750; }
+    .metric-value { display: block; margin-top: 3px; font-size: clamp(0.82rem, 2vw, 1rem); overflow-wrap: anywhere; }
+    .reason { margin: 12px 0 0; color: var(--muted); }
+
+    .table-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--line); border-radius: 11px; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: center; }
+    th { color: var(--muted); background: var(--surface); font-size: 0.75rem; }
+    tbody tr:last-child td { border-bottom: 0; }
+
+    .guardrails { margin-top: 22px; }
+    .guardrails > p { color: var(--muted); }
+    .guardrail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .guardrail { padding: 16px; box-shadow: none; }
+    .guardrail strong { color: var(--red); }
+    .guardrail span { display: block; margin-top: 4px; color: var(--muted); font-size: 0.9rem; }
+
+    .truth-note {
+      margin-top: 22px;
+      padding: 18px 20px;
+      border: 1px solid color-mix(in srgb, var(--amber) 50%, var(--line));
+      border-radius: var(--radius);
+      background: var(--amber-soft);
+    }
+
+    .truth-note p:last-child { margin-bottom: 0; }
+
+    @media (max-width: 850px) {
+      .hero, .calculators { grid-template-columns: 1fr; }
+      .guardrail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 560px) {
+      .page { width: min(100% - 18px, 1180px); padding-top: 10px; }
+      .formula-strip, .field-grid, .metrics, .path-metrics, .guardrail-grid { grid-template-columns: 1fr; }
+      .hero-main, .one-minute, .card { border-radius: 14px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero" aria-labelledby="page-title">
+      <div class="hero-main">
+        <p class="eyebrow">Simple · Stable · Fast</p>
+        <h1 id="page-title">รู้ทันสมการ<br>ในหน้าเดียว</h1>
+        <p class="lede">ใส่ตัวเลข → เห็นเหตุผล → รู้ว่า BUY, SELL หรือ PASS → แยกให้ออกว่า Aₙ, Rₙ และ Eₙ บอกอะไร</p>
+      </div>
+      <aside class="one-minute" aria-label="หลักการใน 60 วินาที">
+        <p class="eyebrow">60-second principle</p>
+        <h2>ถือมูลค่าให้ใกล้ FIX_C</h2>
+        <ol>
+          <li>ราคาขึ้นจนมูลค่าเกินเป้า → <strong>ขาย</strong></li>
+          <li>ราคาลงจนมูลค่าต่ำกว่าเป้า → <strong>ซื้อ</strong></li>
+          <li>ต่างจากเป้าไม่เกิน DIFF → <strong>PASS</strong> เพื่อลดต้นทุน</li>
+        </ol>
+      </aside>
+    </section>
+
+    <section class="formula-strip" aria-label="สูตรหลัก">
+      <div class="formula">V = quantity × price<small>มูลค่าสินทรัพย์ตอนนี้</small></div>
+      <div class="formula">Rₙ = FIX_C × ln(Pₙ/P₀)<small>เส้นอ้างอิงจากราคาเริ่มต้น</small></div>
+      <div class="formula">Eₙ = Aₙ − Rₙ<small>ส่วนเกินของ price-path เหนือเส้นอ้างอิง</small></div>
+    </section>
+
+    <section class="calculators" aria-label="เครื่องคำนวณสมการ">
+      <article class="card">
+        <div class="card-header">
+          <p class="eyebrow">Calculator 01</p>
+          <h2>ตัดสินใจตอนนี้</h2>
+          <p>สูตรเดียวกับ Logical FIX_C ใน Manual Test Lab</p>
+        </div>
+        <form id="decision-form" novalidate>
+          <div class="field-grid">
+            <label>Quantity
+              <input id="decision-quantity" name="quantity" type="number" min="0" step="any" value="10" inputmode="decimal">
+            </label>
+            <label>Price
+              <input id="decision-price" name="price" type="number" min="0.00001" step="any" value="100" inputmode="decimal">
+            </label>
+            <label>FIX_C
+              <input id="decision-fix-c" name="fix_c" type="number" min="0.00001" step="any" value="1500" inputmode="decimal">
+            </label>
+            <label>DIFF
+              <input id="decision-diff" name="diff" type="number" min="0" step="any" value="30" inputmode="decimal">
+            </label>
+          </div>
+          <div class="actions"><button class="primary" type="submit">คำนวณ BUY / SELL / PASS</button></div>
+          <p id="decision-error" class="error" role="alert" aria-live="polite"></p>
+        </form>
+        <div id="decision-result" class="result" aria-live="polite">
+          <div class="result-top">
+            <strong>คำตอบ</strong>
+            <span id="decision-action" class="badge buy">BUY</span>
+          </div>
+          <div class="metrics">
+            <div class="metric"><span class="metric-label">V ตอนนี้</span><span id="decision-value" class="metric-value">1,000.00</span></div>
+            <div class="metric"><span class="metric-label">Gap (FIX_C − V)</span><span id="decision-gap" class="metric-value">+500.00</span></div>
+            <div class="metric"><span class="metric-label">Order quantity</span><span id="decision-order-qty" class="metric-value">5</span></div>
+          </div>
+          <p id="decision-reason" class="reason">มูลค่าต่ำกว่าเป้าเกิน DIFF จึงซื้อเพิ่มให้กลับหา FIX_C</p>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <p class="eyebrow">Calculator 02</p>
+          <h2>อ่านเส้นทางราคา</h2>
+          <p>ใส่ราคาหลัง P₀ คั่นด้วย comma, space หรือบรรทัดใหม่ (สูงสุด 100 จุด)</p>
+        </div>
+        <form id="path-form" novalidate>
+          <div class="field-grid">
+            <label>FIX_C
+              <input id="path-fix-c" name="path_fix_c" type="number" min="0.00001" step="any" value="1500" inputmode="decimal">
+            </label>
+            <label>P₀
+              <input id="path-p0" name="p0" type="number" min="0.00001" step="any" value="100" inputmode="decimal">
+            </label>
+          </div>
+          <label style="margin-top:12px">Price path หลัง P₀
+            <textarea id="path-prices" name="prices" inputmode="decimal">110, 100</textarea>
+          </label>
+          <div class="presets" aria-label="ตัวอย่างเส้นทางราคา">
+            <button type="button" data-path="110">ขึ้นทางเดียว</button>
+            <button type="button" data-path="110, 100">ปิดรอบ</button>
+            <button type="button" data-path="110, 95, 105, 100">ผันผวน</button>
+          </div>
+          <div class="actions"><button class="primary" type="submit">คำนวณ Aₙ / Rₙ / Eₙ</button></div>
+          <p id="path-error" class="error" role="alert" aria-live="polite"></p>
+        </form>
+        <div id="path-result" class="result" aria-live="polite">
+          <div class="metrics path-metrics">
+            <div class="metric"><span class="metric-label">Pₙ</span><span id="path-final" class="metric-value">100.00</span></div>
+            <div class="metric"><span class="metric-label">Aₙ</span><span id="path-actual" class="metric-value">+13.6364</span></div>
+            <div class="metric"><span class="metric-label">Rₙ</span><span id="path-reference" class="metric-value">0.0000</span></div>
+            <div class="metric"><span class="metric-label">Eₙ</span><span id="path-excess" class="metric-value">+13.6364</span></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>รอบ</th><th>ราคา</th><th>ΔAᵢ</th><th>Aₙ</th><th>Rₙ</th><th>Eₙ</th></tr></thead>
+              <tbody id="path-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="guardrails" aria-labelledby="guardrail-title">
+      <p class="eyebrow">Reality checks</p>
+      <h2 id="guardrail-title">เกราะ “รู้ทัน” ก่อนเชื่อตัวเลข</h2>
+      <p>เครื่องหมาย ≠ สำคัญกว่าสูตร เพราะช่วยกันนำแบบจำลองไปเรียกว่าเงินจริง</p>
+      <div class="guardrail-grid">
+        <div class="guardrail"><strong>Eₙ &gt; 0 ≠ พอร์ตกำไร</strong><span>ต้องดู NAV, cash, position และต้นทุนร่วมกัน</span></div>
+        <div class="guardrail"><strong>Quote ≠ Fill</strong><span>ราคาบนจออาจไม่ใช่ราคาที่ซื้อขายได้จริง</span></div>
+        <div class="guardrail"><strong>Accepted ≠ Filled</strong><span>ส่ง order สำเร็จยังไม่ยืนยันว่าได้ quantity</span></div>
+        <div class="guardrail"><strong>Gross ≠ Net</strong><span>หัก fee, spread, slippage และภาษีก่อนสรุปผล</span></div>
+        <div class="guardrail"><strong>Backtest ≠ Live edge</strong><span>ต้องผ่านข้อมูลนอกตัวอย่างและต้นทุนจริง</span></div>
+        <div class="guardrail"><strong>HEALTHY ≠ พร้อมเทรดจริง</strong><span>ต้องมี limits, reconciliation และ kill switch</span></div>
+      </div>
+    </section>
+
+    <aside class="truth-note" aria-label="ขอบเขตของเครื่องคำนวณ">
+      <h3>ขอบเขตที่ต้องจำ</h3>
+      <p><strong>Aₙ/Rₙ/Eₙ ในหน้านี้เป็น educational what-if price path</strong> และยังไม่รวม fee, spread, slippage หรือภาษี ส่วน realized cash-flow ต้องมาจาก broker fill ที่มี quantity, execution price และ position reconciliation จริงเท่านั้น หน้านี้ไม่เรียก Webull API และไม่ส่ง order</p>
+    </aside>
+  </main>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const MAX_PATH_POINTS = 100;
+    const byId = (id) => document.getElementById(id);
+    const finiteNumber = (value, label) => {
+      if (String(value).trim() === "") throw new Error(`${label} ต้องไม่เว้นว่าง`);
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new Error(`${label} ต้องเป็นตัวเลขที่มีค่าจำกัด`);
+      return number;
+    };
+    const nonNegative = (value, label) => {
+      const number = finiteNumber(value, label);
+      if (number < 0) throw new Error(`${label} ต้องไม่น้อยกว่า 0`);
+      return number;
+    };
+    const positive = (value, label) => {
+      const number = finiteNumber(value, label);
+      if (number <= 0) throw new Error(`${label} ต้องมากกว่า 0`);
+      return number;
+    };
+    const roundQuantity = (value) => Math.round((value + Number.EPSILON) * 100000) / 100000;
+    const format = (value, digits = 2, signed = false) => {
+      const clean = Math.abs(value) < 0.5 * 10 ** (-digits) ? 0 : value;
+      const prefix = signed && clean > 0 ? "+" : "";
+      return prefix + clean.toLocaleString("en-US", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    };
+
+    const calculateDecision = ({ quantity, price, fixC, diff }) => {
+      const q = nonNegative(quantity, "Quantity");
+      const p = positive(price, "Price");
+      const c = positive(fixC, "FIX_C");
+      const band = nonNegative(diff, "DIFF");
+      const valueNow = q * p;
+      const gap = c - valueNow;
+      const rebalance = Math.abs(gap);
+      if (rebalance <= band) return { action: "PASS", valueNow, gap, orderQuantity: 0 };
+      return {
+        action: gap > 0 ? "BUY" : "SELL",
+        valueNow,
+        gap,
+        orderQuantity: roundQuantity(rebalance / p),
+      };
+    };
+
+    const parsePricePath = (raw) => {
+      const tokens = raw.trim().split(/[\s,→]+/u).filter(Boolean);
+      if (tokens.length === 0) throw new Error("กรุณาใส่ราคาอย่างน้อย 1 จุดหลัง P₀");
+      if (tokens.length > MAX_PATH_POINTS) throw new Error(`Price path ต้องไม่เกิน ${MAX_PATH_POINTS} จุด`);
+      return tokens.map((token, index) => positive(token, `ราคารอบ ${index + 1}`));
+    };
+
+    const calculatePath = ({ fixC, p0, prices }) => {
+      const c = positive(fixC, "FIX_C");
+      const anchor = positive(p0, "P₀");
+      const path = Array.isArray(prices) ? prices.map((price, index) => positive(price, `ราคารอบ ${index + 1}`)) : parsePricePath(prices);
+      if (path.length === 0) throw new Error("กรุณาใส่ราคาอย่างน้อย 1 จุดหลัง P₀");
+      if (path.length > MAX_PATH_POINTS) throw new Error(`Price path ต้องไม่เกิน ${MAX_PATH_POINTS} จุด`);
+
+      let previous = anchor;
+      let actual = 0;
+      const rows = [{ step: 0, price: anchor, delta: 0, actual: 0, reference: 0, excess: 0 }];
+      path.forEach((price, index) => {
+        const delta = c * (price / previous - 1);
+        actual += delta;
+        const reference = c * Math.log(price / anchor);
+        rows.push({ step: index + 1, price, delta, actual, reference, excess: actual - reference });
+        previous = price;
+      });
+      return { rows, final: rows[rows.length - 1] };
+    };
+
+    const decisionReason = (action) => ({
+      BUY: "มูลค่าต่ำกว่าเป้าเกิน DIFF จึงซื้อเพิ่มให้กลับหา FIX_C",
+      SELL: "มูลค่าสูงกว่าเป้าเกิน DIFF จึงขายส่วนที่เกินออก",
+      PASS: "ส่วนต่างอยู่ในเขต DIFF จึงไม่เทรดเพื่อลดต้นทุน",
+    }[action]);
+
+    const renderDecision = () => {
+      const error = byId("decision-error");
+      try {
+        const result = calculateDecision({
+          quantity: byId("decision-quantity").value,
+          price: byId("decision-price").value,
+          fixC: byId("decision-fix-c").value,
+          diff: byId("decision-diff").value,
+        });
+        error.textContent = "";
+        const badge = byId("decision-action");
+        badge.textContent = result.action;
+        badge.className = `badge ${result.action.toLowerCase()}`;
+        byId("decision-value").textContent = format(result.valueNow);
+        byId("decision-gap").textContent = format(result.gap, 2, true);
+        byId("decision-order-qty").textContent = format(result.orderQuantity, 5).replace(/\.0+$/, "");
+        byId("decision-reason").textContent = decisionReason(result.action);
+        byId("decision-result").hidden = false;
+      } catch (exception) {
+        error.textContent = exception.message;
+        byId("decision-result").hidden = true;
+      }
+    };
+
+    const renderPath = () => {
+      const error = byId("path-error");
+      try {
+        const result = calculatePath({
+          fixC: byId("path-fix-c").value,
+          p0: byId("path-p0").value,
+          prices: byId("path-prices").value,
+        });
+        error.textContent = "";
+        byId("path-final").textContent = format(result.final.price);
+        byId("path-actual").textContent = format(result.final.actual, 4, true);
+        byId("path-reference").textContent = format(result.final.reference, 4, true);
+        byId("path-excess").textContent = format(result.final.excess, 4, true);
+        const fragment = document.createDocumentFragment();
+        result.rows.forEach((row) => {
+          const tr = document.createElement("tr");
+          [row.step, format(row.price, 2), format(row.delta, 4, true), format(row.actual, 4, true), format(row.reference, 4, true), format(row.excess, 4, true)].forEach((value) => {
+            const td = document.createElement("td");
+            td.textContent = value;
+            tr.appendChild(td);
+          });
+          fragment.appendChild(tr);
+        });
+        byId("path-rows").replaceChildren(fragment);
+        byId("path-result").hidden = false;
+      } catch (exception) {
+        error.textContent = exception.message;
+        byId("path-result").hidden = true;
+      }
+    };
+
+    byId("decision-form").addEventListener("submit", (event) => { event.preventDefault(); renderDecision(); });
+    byId("path-form").addEventListener("submit", (event) => { event.preventDefault(); renderPath(); });
+    document.querySelectorAll("[data-path]").forEach((button) => button.addEventListener("click", () => {
+      byId("path-prices").value = button.dataset.path;
+      renderPath();
+    }));
+
+    window.CheatSheetMath = Object.freeze({ calculateDecision, calculatePath, parsePricePath, MAX_PATH_POINTS });
+    renderDecision();
+    renderPath();
+  })();
+  </script>
+</body>
+</html>

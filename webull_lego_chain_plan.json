@@ -1,0 +1,111 @@
+{
+  "framework": "5-step-process",
+  "language": "th",
+  "step_1_goals": {
+    "raw_goal": "สร้าง Streamlit app แบบ LEGO chain สำหรับ Webull dataframe",
+    "refined_goal": "สร้างแอปใหม่ 19 แท็บที่ผู้ใช้รัน 17 transformation ตามลำดับ ได้ Final DataFrame ถูก contract พร้อม UAT safety, tests และ Streamlit Cloud deployment guide",
+    "target_metric": {
+      "name": "end-to-end acceptance ratio",
+      "current": 0,
+      "target": 1,
+      "unit": "ratio",
+      "horizon": "ก่อน deploy Streamlit Cloud ครั้งแรก"
+    },
+    "success_criteria": [
+      "17/17 stages รันและส่งต่อสำเร็จ",
+      "Final DataFrame มี 17 คอลัมน์ตรง contract",
+      "broker ledger และ what-if ไม่ปะปนกัน",
+      "credentials ไม่ถูก persist และ tests ผ่าน 100%"
+    ]
+  },
+  "step_2_problems": [
+    {"id": "P1", "description": "ข้อมูลต้องรวม Webull, Firestore และ CSV contract", "gap_value": 30, "severity": 5},
+    {"id": "P2", "description": "ยังไม่มี strict sequential state machine", "gap_value": 25, "severity": 4},
+    {"id": "P3", "description": "realized cash กับ what-if มีความหมายต่างกัน", "gap_value": 20, "severity": 5},
+    {"id": "P4", "description": "UAT และ Cloud secrets ต้อง fail-closed", "gap_value": 15, "severity": 5},
+    {"id": "P5", "description": "ยังไม่มี tests/docs สำหรับแอปใหม่", "gap_value": 10, "severity": 4}
+  ],
+  "step_3_diagnosis": [
+    {
+      "problem_id": "P1",
+      "root_causes": [
+        {"id": "RC1", "cause": "Webull API ไม่มี DNA และ custom ledger", "why_chain": ["API ให้ข้อมูล broker", "DNA และเหตุผลถูกเก็บใน Firestore"], "impact_weight": 0.6, "evidence": "ตรวจ WebullManualClient และ trade log schema"},
+        {"id": "RC2", "cause": "CSV มี unnamed index และ nullable rows", "why_chain": ["export รวม index", "ERROR/non-price rows ไม่มีค่าครบ"], "impact_weight": 0.4, "evidence": "CSV มี 32 แถว 18 fields รวม index"}
+      ]
+    },
+    {
+      "problem_id": "P2",
+      "root_causes": [
+        {"id": "RC3", "cause": "Streamlit rerun ไม่มี dependency graph โดยอัตโนมัติ", "why_chain": ["widget เปลี่ยนแล้วสคริปต์ rerun", "ผล downstream อาจค้าง"], "impact_weight": 1.0, "evidence": "ต้องเพิ่ม input hashing และ invalidation"}
+      ]
+    },
+    {
+      "problem_id": "P3",
+      "root_causes": [
+        {"id": "RC4", "cause": "CSV คำนวณทุก quote แต่เงินจริงต้องอาศัย fill", "why_chain": ["ORDER_SUBMITTED ไม่ยืนยัน cash", "ต้องมี execution price และ reconciliation"], "impact_weight": 1.0, "evidence": "CSV ไม่มี ORDER_FILLED แต่มีค่า what-if"}
+      ]
+    },
+    {
+      "problem_id": "P4",
+      "root_causes": [
+        {"id": "RC5", "cause": "แอป Cloud ถือ service account และ UAT mutation capability", "why_chain": ["repo เป็น public", "ผู้ชมต้องถูกจำกัดและ output ต้อง redact"], "impact_weight": 1.0, "evidence": "เลือก private single-user และ Streamlit secrets"}
+      ]
+    },
+    {
+      "problem_id": "P5",
+      "root_causes": [
+        {"id": "RC6", "cause": "ชุดทดสอบเดิมไม่รู้จัก LEGO workflow", "why_chain": ["ยังไม่มี registry หรือ app entry point", "ไม่มี gating/audit tests"], "impact_weight": 1.0, "evidence": "baseline 71 tests ครอบคลุม dashboard เดิม"}
+      ]
+    }
+  ],
+  "step_4_design": [
+    {"id": "S1", "targets_root_cause": "RC1", "intervention": "สร้าง typed stage registry และ hybrid data contract", "expected_effect": 30, "cost": 8, "priority_score": 3.75, "rank": 1},
+    {"id": "S2", "targets_root_cause": "RC3", "intervention": "สร้าง hashed sequential state machine", "expected_effect": 25, "cost": 8, "priority_score": 3.125, "rank": 2},
+    {"id": "S3", "targets_root_cause": "RC4", "intervention": "แยก broker-confirmed และ what-if ledger", "expected_effect": 20, "cost": 8, "priority_score": 2.5, "rank": 3},
+    {"id": "S4", "targets_root_cause": "RC5", "intervention": "เพิ่ม UAT confirmation, redaction และ audit", "expected_effect": 15, "cost": 6, "priority_score": 2.5, "rank": 4},
+    {"id": "S5", "targets_root_cause": "RC6", "intervention": "เพิ่ม regression, AppTest และ deployment guide", "expected_effect": 10, "cost": 6, "priority_score": 1.667, "rank": 5}
+  ],
+  "step_5_do_it": {
+    "action_plan": [
+      {"action": "สร้าง plan JSON และ offline HTML guide", "owner": "Codex", "start": "Phase 1", "end": "Phase 1", "depends_on": []},
+      {"action": "สร้าง pipeline registry และ dual-ledger contract", "owner": "Codex", "start": "Phase 1", "end": "Phase 2", "depends_on": ["S1", "S3"]},
+      {"action": "สร้าง 19-tab Streamlit state machine", "owner": "Codex", "start": "Phase 2", "end": "Phase 3", "depends_on": ["S2"]},
+      {"action": "เชื่อม Webull, Firestore และ UAT audit", "owner": "Codex", "start": "Phase 3", "end": "Phase 4", "depends_on": ["S4"]},
+      {"action": "เพิ่ม tests, README และ Cloud checklist", "owner": "Codex", "start": "Phase 4", "end": "Phase 5", "depends_on": ["S5"]}
+    ],
+    "measurement": {
+      "kpis": [
+        {"name": "Stage completion", "formula": "successful_stage_runs / 17", "target": 1, "frequency": "ทุก session"},
+        {"name": "Contract conformance", "formula": "passed_contract_assertions / all_contract_assertions", "target": 1, "frequency": "ทุก test run"},
+        {"name": "Regression pass rate", "formula": "passed_tests / total_tests", "target": 1, "frequency": "ทุก change"}
+      ],
+      "evaluation_equations": [
+        {"name": "Goal attainment", "formula": "A = G_achieved / G_target", "interpret": "A >= 1 หมายถึงผ่านเป้า"},
+        {"name": "Progress ratio", "formula": "P = (G_n - G_0) / (G_target - G_0)", "interpret": "สัดส่วนความคืบหน้าจาก baseline"},
+        {"name": "Weighted quality", "formula": "S = 0.40*stage + 0.35*contract + 0.25*tests", "interpret": "ต้องได้ 1.0 ก่อน deploy"}
+      ],
+      "loop": {
+        "control_equation": "e_n = G_target - G_n",
+        "convergence_rate": "r_n = |e_n| / |e_{n-1}|",
+        "stop_condition": "|e_n| <= epsilon",
+        "epsilon": 0.01,
+        "gain_K": 0.5,
+        "correction": "u_{n+1} = K * e_n",
+        "n_max": 5,
+        "escalation_ladder": [
+          {"if": "r_n < 1 (shrinking, not yet at epsilon)", "loop_back_to": "step_5", "action": "แก้ acceptance failures รอบถัดไป"},
+          {"if": "r_n ~ 1 (stalled)", "loop_back_to": "step_3", "action": "ทบทวน root cause และ contract"},
+          {"if": "r_n > 1 (diverging)", "loop_back_to": "step_2", "action": "ทบทวน problem/data-source boundary"},
+          {"if": "still far after n cycles", "loop_back_to": "step_1", "action": "ปรับ target หรือแบ่ง release"}
+        ]
+      }
+    }
+  },
+  "assumptions": [
+    "รวม 19 tabs: 0, 1-17 และ 18",
+    "Production ไม่มี mutation path",
+    "Firebase credentials มาจาก Streamlit secrets",
+    "แอปจำกัดเป็น private single-user",
+    "ไม่ publish หรือ deploy โดยอัตโนมัติ"
+  ]
+}
