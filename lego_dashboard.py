@@ -492,9 +492,9 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
         "Environment", options=list(WEBULL_ENDPOINTS), index=0, key="lego_environment"
     )
     st.code(WEBULL_ENDPOINTS[environment], language=None)
-    account_id = st.text_input("Account ID", value="", key="lego_account_id", autocomplete="off")
-    app_key = st.text_input("App Key", value="", type="password", key="lego_app_key", autocomplete="off")
-    app_secret = st.text_input("App Secret", value="", type="password", key="lego_app_secret", autocomplete="off")
+    account_id = st.text_input("Account ID", value="1251161573554425856", key="lego_account_id", autocomplete="off")
+    app_key = st.text_input("App Key", value="c12c25c93f98169ad56f5148e4edfd16", type="password", key="lego_app_key", autocomplete="off")
+    app_secret = st.text_input("App Secret", value="f3ac0da97d2085ad4ce14b961cbd8824", type="password", key="lego_app_secret", autocomplete="off")
     symbol = st.text_input(
         "Symbol (จำเป็น — ราคา Pₙ มาจาก live quote ของ symbol นี้)", value="", key="lego_symbol_input"
     ).strip().upper()
