@@ -208,6 +208,7 @@ def clear_connection_state(*, clear_widgets: bool = True) -> None:
         "lego_auth_summary",
         "lego_auth_fingerprint",
         "lego_reference_csv",
+        "lego_use_csv_source",
         "lego_symbol",
         "lego_dna_code",
         "lego_all_in_status",
@@ -256,6 +257,32 @@ def _real_webull_settings(settings: ConnectionSettings) -> WebullSettings:
         app_secret=settings.app_secret,
         region=settings.region,
     )
+
+
+def resolve_chain_source(
+    firestore_raw: pd.DataFrame,
+    reference: pd.DataFrame | None,
+    *,
+    use_csv_as_source: bool,
+) -> tuple[pd.DataFrame, str]:
+    """Pick the tabular rows the LEGO chain will transform.
+
+    The chain's table is built **only** from trade-log rows.  By default that is
+    the Firestore ``shannon_demon_trades`` log.  The live Webull API reads
+    (account/balance/positions/quote) authenticate the session and populate the
+    summary, but are never turned into chain rows — so an empty trade log yields
+    an empty Final DataFrame even though every step "succeeds".  When the user
+    explicitly opts in and a non-empty CSV is uploaded, that CSV becomes the
+    source so an empty Firestore log does not force an empty chain.
+    """
+
+    if (
+        use_csv_as_source
+        and isinstance(reference, pd.DataFrame)
+        and not reference.empty
+    ):
+        return reference, "uploaded_csv"
+    return firestore_raw, "firestore_trade_log"
 
 
 def authenticate_and_load(
@@ -826,9 +853,19 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
         help="signal ที่บอท log ไว้มีสิทธิ์ก่อน; decoder เติมเฉพาะ signal ที่หายไป",
     ).strip()
     reference_file = st.file_uploader(
-        "CSV reference (optional — ไม่ใช้แทน Firestore หลัก)",
+        "CSV reference (optional — ใช้เป็นข้อมูลของ chain ได้เมื่อติ๊กช่องด้านล่าง)",
         type=["csv"],
         key="lego_reference_upload",
+    )
+    use_csv_as_source = st.checkbox(
+        "ใช้ CSV ด้านบนเป็นข้อมูลของ LEGO chain (สำหรับทดสอบ/เมื่อ Firestore ว่าง)",
+        value=False,
+        key="lego_use_csv_source_input",
+        help=(
+            "ปกติ LEGO chain สร้างตารางจาก Firestore trade log เท่านั้น — การยิง Webull API "
+            "ใช้ยืนยันการเชื่อมต่อและสรุปผล ไม่ได้กลายเป็นแถวข้อมูล ติ๊กช่องนี้เพื่อเดินเชนจาก CSV "
+            "ที่อัปโหลดแทน (เช่น Firestore ยังว่าง หรืออยากทดสอบด้วยไฟล์ตัวอย่าง)"
+        ),
     )
 
     settings = ConnectionSettings(
@@ -878,11 +915,16 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
                 reference_file.seek(0)
                 reference = prepare_raw_frame(pd.read_csv(reference_file))
 
+            effective_raw, chain_source = resolve_chain_source(
+                raw, reference, use_csv_as_source=use_csv_as_source
+            )
+
             st.session_state.lego_settings = settings
             st.session_state.lego_db = db
             st.session_state.lego_config = config
-            st.session_state.lego_raw = raw
+            st.session_state.lego_raw = effective_raw
             st.session_state.lego_reference_csv = reference
+            st.session_state.lego_use_csv_source = use_csv_as_source
             st.session_state.lego_symbol = symbol
             st.session_state.lego_dna_code = dna_code
             st.session_state.lego_results = {}
@@ -891,6 +933,8 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
             st.session_state.lego_auth_summary = {
                 **live_summary,
                 "reference_csv_rows": len(reference) if reference is not None else 0,
+                "chain_source": chain_source,
+                "chain_rows": len(effective_raw),
             }
         except Exception as exc:
             clear_connection_state(clear_widgets=False)
@@ -898,13 +942,37 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
 
     summary = st.session_state.get("lego_auth_summary")
     if summary is not None:
-        st.success("Authenticated connection สำเร็จ — พร้อมส่ง raw dataframe ไป Step 1")
         safe_summary = redact_payload(summary)
+        chain_rows = int(
+            safe_summary.get("chain_rows", safe_summary.get("trade_rows", 0))
+        )
+        chain_source = safe_summary.get("chain_source", "firestore_trade_log")
+        source_label = (
+            "CSV ที่อัปโหลด"
+            if chain_source == "uploaded_csv"
+            else f"Firestore `{config.trade_collection}`"
+        )
+        if chain_rows == 0:
+            st.error(
+                "เชื่อมต่อ Webull สำเร็จ แต่โหลดข้อมูลได้ 0 แถว — LEGO chain จะว่างทั้งหมด "
+                "(ทุก step จะ 'สำเร็จ' บนตารางว่าง และ Final DataFrame จะไม่มีข้อมูล)\n\n"
+                f"หลักการ: ตาราง LEGO chain สร้างจาก trade log ({source_label}) เท่านั้น — "
+                "การยิง Webull API (account/balance/positions/quote) ใช้ยืนยันการเชื่อมต่อและสรุปผล "
+                "ไม่ได้ถูกแปลงเป็นแถวในตาราง\n\n"
+                "วิธีแก้: (1) ให้บอทบันทึกเทรดลง collection นี้ในโปรเจกต์ Firestore เดียวกันก่อน · "
+                "(2) ตรวจว่า service account ใน secrets ชี้โปรเจกต์ที่มีข้อมูลจริง · "
+                '(3) อัปโหลด CSV แล้วติ๊ก "ใช้ CSV เป็นข้อมูลของ LEGO chain" เพื่อเดินเชนจากไฟล์'
+            )
+        else:
+            st.success(
+                f"Authenticated connection สำเร็จ — พร้อมส่ง {chain_rows} แถวจาก "
+                f"{source_label} ไป Step 1"
+            )
         summary_cols = st.columns(4)
         summary_cols[0].metric("Environment", safe_summary["environment"])
-        summary_cols[1].metric("Trade rows", safe_summary["trade_rows"])
+        summary_cols[1].metric("Chain rows", chain_rows)
         summary_cols[2].metric("FIX_C", f"${config.fix_c:,.2f}")
-        summary_cols[3].metric("Reference rows", safe_summary["reference_csv_rows"])
+        summary_cols[3].metric("Firestore trade rows", safe_summary["trade_rows"])
         with st.expander("All authenticated output (redacted)"):
             st.json(safe_summary)
         st.download_button(
@@ -973,7 +1041,15 @@ def render_final_tab(config: LegoDashboardConfig) -> None:
 
     final = final_dataframe(results[17])
     what_if = what_if_dataframe(results[17], config.fix_c)
-    st.success("LEGO chain สำเร็จ 17/17 — Final DataFrame พร้อมใช้งาน")
+    if final.empty:
+        st.warning(
+            "LEGO chain เดินครบ 17/17 แต่ได้ 0 แถว — Final DataFrame ว่าง\n\n"
+            "หลักการ: แหล่งข้อมูลของเชน (trade log) ไม่มีแถว ทุก step จึงทำงานบนตารางว่าง "
+            "และรายงาน success โดยไม่มีข้อมูลจริง · กลับไป Tab 0 เพื่อโหลดข้อมูลจาก Firestore "
+            'ที่มีเทรดจริง หรืออัปโหลด CSV แล้วติ๊ก "ใช้ CSV เป็นข้อมูลของ LEGO chain"'
+        )
+    else:
+        st.success("LEGO chain สำเร็จ 17/17 — Final DataFrame พร้อมใช้งาน")
     st.caption(
         "ตารางหลักใช้ broker-confirmed ledger: terminal fill + filled quantity + "
         "position reconciliation + execution price จริงเท่านั้น"
@@ -1046,10 +1122,15 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
 
         status = st.session_state.get("lego_all_in_status")
         if isinstance(status, dict):
-            if status.get("ok"):
+            if status.get("ok") and int(status.get("rows", 0)) > 0:
                 st.success(
                     f"ครบ 0→18 · {status.get('rows', 0)} rows · "
                     f"{status.get('elapsed_seconds', 0):.3f}s"
+                )
+            elif status.get("ok"):
+                st.warning(
+                    f"เดินครบ 0→18 แต่ได้ 0 rows · {status.get('elapsed_seconds', 0):.3f}s — "
+                    "trade log ว่าง ตารางจึงว่าง (ดูหลักการและวิธีแก้ที่ Tab 0)"
                 )
             else:
                 st.error(
@@ -1077,6 +1158,13 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
                     symbol=symbol,
                     dna_code=dna_code,
                 )
+                reference = st.session_state.get("lego_reference_csv")
+                use_csv_as_source = bool(
+                    st.session_state.get("lego_use_csv_source", False)
+                )
+                raw, chain_source = resolve_chain_source(
+                    raw, reference, use_csv_as_source=use_csv_as_source
+                )
                 progress.progress(1 / 19, text="Step 0 สำเร็จ · authenticated real reads")
 
                 def update_progress(step: int) -> None:
@@ -1095,7 +1183,6 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
                     on_step=update_progress,
                 )
                 elapsed = time.perf_counter() - started
-                reference = st.session_state.get("lego_reference_csv")
                 st.session_state.lego_raw = raw
                 st.session_state.lego_db = db
                 st.session_state.lego_config = config
@@ -1105,6 +1192,8 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
                     "reference_csv_rows": (
                         len(reference) if isinstance(reference, pd.DataFrame) else 0
                     ),
+                    "chain_source": chain_source,
+                    "chain_rows": len(raw),
                     "all_in_completed_steps": list(range(19)),
                 }
                 st.session_state.lego_all_in_status = {
