@@ -384,6 +384,84 @@ def test_sidebar_all_in_unlocks_after_authenticated_session():
     assert any("Production" in item.value for item in app.info)
 
 
+def _empty_completed_results():
+    """Run the full 1→17 chain over an empty trade log (0 rows)."""
+
+    from lego_pipeline import PipelineContext, dataframe_fingerprint, run_stage
+
+    raw = prepare_raw_frame(pd.DataFrame())
+    context = PipelineContext(
+        fix_c=1500.0, source_hash=dataframe_fingerprint(raw), dna_code=""
+    )
+    results = {}
+    previous = None
+    for number in range(1, 18):
+        results[number] = run_stage(number, raw, previous, context)
+        previous = results[number]
+    return raw, results
+
+
+def test_resolve_chain_source_prefers_csv_only_when_opted_in():
+    from lego_dashboard import resolve_chain_source
+
+    firestore_rows = prepare_raw_frame(pd.DataFrame())  # empty Firestore log
+    csv_rows = prepare_raw_frame(
+        pd.DataFrame([{"created_at": "2026-07-13T14:20:00Z", "symbol": "AAPL"}])
+    )
+
+    # Opted out: Firestore stays the source even when empty and a CSV exists.
+    raw, source = resolve_chain_source(
+        firestore_rows, csv_rows, use_csv_as_source=False
+    )
+    assert source == "firestore_trade_log"
+    assert len(raw) == 0
+
+    # Opted in with a non-empty CSV: the CSV becomes the chain source.
+    raw, source = resolve_chain_source(
+        firestore_rows, csv_rows, use_csv_as_source=True
+    )
+    assert source == "uploaded_csv"
+    assert len(raw) == 1
+
+    # Opted in but no CSV uploaded: fall back to Firestore, never crash.
+    raw, source = resolve_chain_source(firestore_rows, None, use_csv_as_source=True)
+    assert source == "firestore_trade_log"
+    assert len(raw) == 0
+
+
+def test_auth_tab_flags_an_empty_trade_log_instead_of_success():
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_auth_summary"] = {
+        "environment": "Test (UAT)",
+        "trade_rows": 0,
+        "reference_csv_rows": 0,
+        "chain_rows": 0,
+        "chain_source": "firestore_trade_log",
+    }
+    app.run(timeout=30)
+
+    assert not app.exception
+    # An empty load is reported as an error that explains the principle...
+    assert any("โหลดข้อมูลได้ 0 แถว" in item.value for item in app.error)
+    assert any("ตาราง LEGO chain สร้างจาก trade log" in item.value for item in app.error)
+    # ...never dressed up as a "ready to send" success.
+    assert not any("พร้อมส่ง" in item.value for item in app.success)
+
+
+def test_final_tab_reports_an_empty_chain_honestly():
+    raw, results = _empty_completed_results()
+
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_raw"] = raw
+    app.session_state["lego_results"] = results
+    app.run(timeout=30)
+
+    assert not app.exception
+    # A completed-but-empty chain warns instead of claiming it is ready to use.
+    assert any("Final DataFrame ว่าง" in item.value for item in app.warning)
+    assert not any("พร้อมใช้งาน" in item.value for item in app.success)
+
+
 def test_five_step_artifacts_are_machine_readable_and_offline():
     import json
 
