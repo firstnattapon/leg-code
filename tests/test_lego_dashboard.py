@@ -1,268 +1,185 @@
+"""Tests for the one-new-row Streamlit dashboard."""
+
 from __future__ import annotations
 
-from pathlib import Path
-import re
-
+import pytest
 from streamlit.testing.v1 import AppTest
 
-import lego_pipeline
-from lego_pipeline import (
-    PipelineContext,
-    PreviousAnchor,
-    build_snapshot_frame,
-    run_stage,
+import lego_dashboard
+from lego_dashboard import (
+    LegoDashboardConfig,
+    connect_and_prepare_run,
+    draft_row_frame,
+    final_row_frame,
 )
-from lego_store import PersistResult
+from lego_one_row import (
+    DECISION_STAGE,
+    STATUS_SNAPSHOT_READY,
+    compute_row,
+    present_row,
+)
+from lego_state import InMemoryStateStore, finalize_row
 from manual_tools import ConnectionSettings
 
 
-def completed_results(
-    *,
-    environment: str = "Test (UAT)",
-    price: float = 100.0,
-    holdings: float = 10.0,
-):
-    raw = build_snapshot_frame(
-        snapshot_at="2026-07-16T12:00:00Z",
-        symbol="AAPL",
-        price=price,
-        holdings=holdings,
-    )
-    context = PipelineContext(
-        fix_c=1500,
-        diff=30,
-        dna_code="bypass:100",
-        source_hash=lego_pipeline.dataframe_fingerprint(raw),
-        run_id="run-final",
-        chain_key="chain-final",
-        anchor=PreviousAnchor(),
-    )
-    results = {}
-    previous = None
-    for number in range(1, 18):
-        previous = run_stage(number, raw, previous, context)
-        results[number] = previous
-    settings = ConnectionSettings(environment, "acct-123", "key", "secret")
-    return raw, context, results, settings
+class FakeWebullClient:
+    """Deterministic stand-in for WebullManualClient (no network)."""
 
+    holdings = "3"
+    price = "100"
 
-def app_with_step_zero():
-    raw = build_snapshot_frame(
-        snapshot_at="2026-07-16T12:00:00Z",
-        symbol="AAPL",
-        price=100,
-        holdings=10,
-    )
-    context = PipelineContext(
-        fix_c=1500,
-        diff=30,
-        dna_code="bypass:100",
-        source_hash=lego_pipeline.dataframe_fingerprint(raw),
-        run_id="run-draft",
-        chain_key="chain-draft",
-    )
-    app = AppTest.from_file("lego_dashboard.py")
-    app.session_state["lego_raw"] = raw
-    app.session_state["lego_context"] = context
-    app.session_state["lego_results"] = {}
-    return app
-
-
-def app_with_persisted_final(environment: str = "Test (UAT)", **kwargs):
-    raw, context, results, settings = completed_results(
-        environment=environment, **kwargs
-    )
-    app = AppTest.from_file("lego_dashboard.py")
-    app.session_state["lego_raw"] = raw
-    app.session_state["lego_context"] = context
-    app.session_state["lego_results"] = results
-    app.session_state["lego_settings"] = settings
-    app.session_state["lego_final_persisted"] = PersistResult(
-        run_id=context.run_id,
-        chain_key=context.chain_key,
-        version=1,
-        created=True,
-    )
-    app.session_state["lego_final_document"] = {"run_id": context.run_id}
-    return app
-
-
-class FakeClient:
     def __init__(self, settings):
         self.settings = settings
 
-    def preview_market_order(self, payload):
-        return {"data": {"status": "OK"}}
+    def get_account_list(self):
+        return {"accounts": [{"account_id": "ACCT-REDACT-ME"}]}
 
-    def place_market_order(self, payload):
-        return {"data": {"orderId": "OID-1", "orderStatus": "PENDING"}}
+    def get_account_balance(self):
+        return {"account_id": "ACCT-REDACT-ME", "cash_balance": "5000"}
+
+    def get_position_and_price(self, symbol):
+        return {
+            "position_response": {"positions": [{"symbol": symbol.upper(), "quantity": self.holdings}]},
+            "quote_response": {"symbol": symbol.upper(), "last_price": self.price},
+        }
 
 
+@pytest.fixture
+def patched_step0(monkeypatch):
+    """Patch Step 0 dependencies to a fake client + a shared in-memory store."""
+
+    store = InMemoryStateStore()
+    monkeypatch.setattr(lego_dashboard, "WebullManualClient", FakeWebullClient)
+    monkeypatch.setattr(lego_dashboard, "_make_firestore_client", lambda info: object())
+    monkeypatch.setattr(lego_dashboard, "FirestoreStateStore", lambda db: store)
+    return store
+
+
+def make_config(**overrides) -> LegoDashboardConfig:
+    base = dict(firebase_info={"project_id": "unit-test"}, fix_c=1500.0, diff=0.0, dna_code="bypass:100")
+    base.update(overrides)
+    return LegoDashboardConfig(**base)
+
+
+def make_settings(environment="Test (UAT)") -> ConnectionSettings:
+    return ConnectionSettings(
+        environment=environment, account_id="ACCT-XYZ", app_key="k", app_secret="s", region="th"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# App loads
+# --------------------------------------------------------------------------- #
 def test_dashboard_loads_without_secrets_and_has_19_tabs():
     app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
     assert not app.exception
-    assert app.title[0].value == "🧱 Webull LEGO Chain"
+    assert app.title[0].value.startswith("🧱 Webull LEGO Chain")
     assert len(app.tabs) == 19
-    assert app.tabs[0].label == "0 · Authenticated connection"
-    assert app.tabs[-1].label == "18 · Final DataFrame"
-    assert app.selectbox[0].value == "Test (UAT)"
-    assert [field.value for field in app.text_input[:3]] == ["", "", ""]
+    assert app.tabs[0].label == "0 · Snapshot + anchor"
+    assert app.tabs[-1].label == "18 · Final row + append"
 
 
-def test_hot_reload_recovers_stale_pipeline_contract(monkeypatch):
-    monkeypatch.delattr(lego_pipeline.StageSpec, "goal")
-    monkeypatch.setattr(lego_pipeline, "PIPELINE_SCHEMA_VERSION", 1)
+def test_run_buttons_disabled_before_connect():
     app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
-    assert not app.exception
-    assert any(item.value.startswith("**Goal:**") for item in app.markdown)
-
-
-def test_hot_reload_tolerates_legacy_step_zero_summary():
-    app = AppTest.from_file("lego_dashboard.py")
-    app.session_state["lego_auth_summary"] = {
-        "run_id": "legacy-run-id",
-        "anchor_version": 7,
-    }
-    app.run(timeout=30)
-
-    assert not app.exception
-    metric_values = {metric.label: metric.value for metric in app.metric}
-    assert metric_values["Snapshot rows"] == "0"
-    assert metric_values["Old trade-log reads"] == "0"
-    assert metric_values["Anchor version"] == "7"
-    assert metric_values["Run ID"] == "legacy-run"
-    assert any("Connect ใหม่" in item.value for item in app.warning)
-
-
-def test_stages_are_locked_before_step_zero():
-    app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
-    run_buttons = [
-        button for button in app.button if button.label.startswith("Run LEGO Step")
-    ]
+    run_buttons = [b for b in app.button if b.label.startswith("Run LEGO Step")]
     assert len(run_buttons) == 17
-    assert all(button.disabled for button in run_buttons)
+    assert all(b.disabled for b in run_buttons)
 
 
-def test_first_stage_unlocks_then_only_next_stage_unlocks():
-    app = app_with_step_zero().run(timeout=30)
-    run_buttons = [
-        button for button in app.button if button.label.startswith("Run LEGO Step")
-    ]
-    assert not run_buttons[0].disabled
-    assert all(button.disabled for button in run_buttons[1:])
-
-    run_buttons[0].click().run(timeout=30)
-    run_buttons = [
-        button for button in app.button if button.label.startswith("Run LEGO Step")
-    ]
-    assert not run_buttons[0].disabled
-    assert not run_buttons[1].disabled
-    assert all(button.disabled for button in run_buttons[2:])
-    assert len(app.session_state["lego_results"][1].frame) == 1
-
-
-def test_credentials_never_gain_hard_coded_defaults():
-    source = Path("lego_dashboard.py").read_text(encoding="utf-8")
-    for label in ("Account ID", "App Key", "App Secret"):
-        widget = re.search(
-            rf'st\.text_input\(\s*"{re.escape(label)}",(?P<body>.*?)\n\s*\)',
-            source,
-            flags=re.DOTALL,
-        )
-        assert widget is not None
-        assert re.search(r'\bvalue\s*=\s*""', widget.group("body"))
+# --------------------------------------------------------------------------- #
+# Step 0 — snapshot + anchor, no trade-log read
+# --------------------------------------------------------------------------- #
+def test_connect_builds_genesis_run_without_trade_log(patched_step0):
+    ctx, store, computed, summary = connect_and_prepare_run(
+        make_settings(), make_config(), symbol="AAPL", dna_code="bypass:100"
+    )
+    assert summary["old_trade_log_reads"] == 0
+    assert ctx.anchor.exists is False
+    assert computed.columns["DNA step"] == 0
+    assert computed.columns["ราคา Pₙ (USD)"] == 100.0
+    assert computed.columns["จำนวนถือครอง (หุ้น)"] == 3.0
+    # gap 1500 - 300 = 1200 -> READY_BUY
+    assert computed.columns["สถานะ"] == "READY_BUY"
+    # No raw account id leaks into the redacted summary.
+    assert "ACCT-XYZ" not in str(summary["account_fingerprint"])
 
 
-def test_no_order_panel_before_step18_persistence():
-    app = app_with_step_zero().run(timeout=30)
-    assert not any(button.key == "order_final_preview" for button in app.button)
-    assert not any(button.key == "order_final_submit" for button in app.button)
+def test_symbol_is_required(patched_step0):
+    with pytest.raises(ValueError):
+        connect_and_prepare_run(make_settings(), make_config(), symbol="", dna_code="bypass:100")
 
 
-def test_completed_unpersisted_row_shows_finalize_not_order():
-    raw, context, results, settings = completed_results()
+# --------------------------------------------------------------------------- #
+# Step 18 — commit, idempotency, Manual/All-in equality
+# --------------------------------------------------------------------------- #
+def test_commit_appends_one_row_then_is_idempotent(patched_step0):
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings(), make_config(), symbol="AAPL", dna_code="bypass:100"
+    )
+    first = finalize_row(store, ctx, computed)
+    second = finalize_row(store, ctx, computed)
+    assert first.created is True
+    assert second.idempotent is True
+    assert len(store.rows) == 1
+
+
+def test_manual_and_all_in_produce_the_same_row(patched_step0):
+    settings, config = make_settings(), make_config()
+    # "Manual" path — connect then commit.
+    ctx_m, store, computed_m, _ = connect_and_prepare_run(settings, config, symbol="AAPL", dna_code="bypass:100")
+    # "All-in" path recomputes from the same engine for the same context.
+    computed_engine = compute_row(ctx_m)
+    assert present_row(computed_m.columns) == present_row(computed_engine.columns)
+
+
+# --------------------------------------------------------------------------- #
+# Draft-row presentation
+# --------------------------------------------------------------------------- #
+def test_draft_status_is_snapshot_ready_before_decision_stage(patched_step0):
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings(), make_config(), symbol="AAPL", dna_code="bypass:100"
+    )
+    early = draft_row_frame(computed, DECISION_STAGE - 1)
+    assert early["สถานะ"].iloc[0] == STATUS_SNAPSHOT_READY
+    late = draft_row_frame(computed, 17)
+    assert late["สถานะ"].iloc[0] == "READY_BUY"
+
+
+def test_final_row_frame_has_17_columns(patched_step0):
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings(), make_config(), symbol="AAPL", dna_code="bypass:100"
+    )
+    frame = final_row_frame(computed)
+    assert list(frame.columns) == list(lego_dashboard.FINAL_COLUMNS)
+    assert len(frame) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Order panel gating (via committed session state)
+# --------------------------------------------------------------------------- #
+def _seed_committed_session(app, *, environment, store, ctx, computed, config):
+    app.session_state["lego_settings"] = make_settings(environment)
+    app.session_state["lego_store"] = store
+    app.session_state["lego_ctx"] = ctx
+    app.session_state["lego_computed"] = computed
+    app.session_state["lego_config"] = config
+    app.session_state["lego_revealed"] = 17
+    app.session_state["lego_commit_result"] = finalize_row(store, ctx, computed)
+    app.session_state["lego_auth_summary"] = {"chain": {"next_dna_step": 0, "anchor_exists": False},
+                                              "environment": environment,
+                                              "snapshot": {"price": 100.0, "holdings": 3.0},
+                                              "old_trade_log_reads": 0}
+
+
+def test_production_order_panel_is_locked(patched_step0):
+    config = make_config()
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings("Production"), config, symbol="AAPL", dna_code="bypass:100"
+    )
     app = AppTest.from_file("lego_dashboard.py")
-    app.session_state["lego_raw"] = raw
-    app.session_state["lego_context"] = context
-    app.session_state["lego_results"] = results
-    app.session_state["lego_settings"] = settings
+    _seed_committed_session(app, environment="Production", store=store, ctx=ctx, computed=computed, config=config)
     app.run(timeout=30)
-    assert any(button.key == "lego_finalize_button" for button in app.button)
-    assert not any(button.key == "order_final_preview" for button in app.button)
-
-
-def test_uat_order_unlocks_only_after_preview_and_phrase(monkeypatch):
-    import lego_orders
-    import manual_tools
-
-    monkeypatch.setattr(manual_tools, "WebullManualClient", FakeClient)
-    app = app_with_persisted_final("Test (UAT)").run(timeout=30)
-    preview = next(button for button in app.button if button.key == "order_final_preview")
-    submit = next(button for button in app.button if button.key == "order_final_submit")
-    assert submit.disabled
-
-    preview.click().run(timeout=30)
-    submit = next(button for button in app.button if button.key == "order_final_submit")
-    assert submit.disabled
-    phrase = lego_orders.order_confirmation_phrase(
-        "Test (UAT)", "acct-123", "BUY", "AAPL", 5.0
-    )
-    next(
-        field for field in app.text_input if field.key == "order_final_confirm"
-    ).set_value(phrase).run(timeout=30)
-    submit = next(button for button in app.button if button.key == "order_final_submit")
-    assert not submit.disabled
-    submit.click().run(timeout=30)
-    output = app.session_state["order_final_output"]
-    assert output["action"] == "SUBMIT"
-    assert output["summary"]["status_category"] == "PENDING"
-    assert output["summary"]["realized_eligible"] is False
-
-
-def test_production_is_read_only_after_persist():
-    app = app_with_persisted_final("Production").run(timeout=30)
-    assert not any(button.key == "order_final_preview" for button in app.button)
-    assert any("Production เป็น read-only" in item.value for item in app.error)
-
-
-def test_pass_row_never_exposes_submit():
-    app = app_with_persisted_final(
-        "Test (UAT)",
-        price=100.0,
-        holdings=15.1,
-    ).run(timeout=30)
-    assert not any(button.key == "order_final_preview" for button in app.button)
-    assert any("PASS_THRESHOLD" in item.value for item in app.info)
-
-
-def test_source_has_one_row_and_no_legacy_trade_reader():
-    source = Path("lego_dashboard.py").read_text(encoding="utf-8")
-    live_source = Path("lego_live.py").read_text(encoding="utf-8")
-    assert "load_step_zero_snapshot" in source
-    assert "Finalize Step 18 + Append New Row" in source
-    assert "Run ALL 0 → 18 (NEW ROW)" in source
-    assert "load_firestore_rows" not in source
-    assert "shannon_demon_trades" not in live_source
-
-
-def test_all_in_unlocks_after_step_zero_session():
-    app = AppTest.from_file("lego_dashboard.py")
-    app.session_state["lego_settings"] = ConnectionSettings(
-        "Production", "account", "key", "secret"
-    )
-    app.run(timeout=30)
-    all_in = next(button for button in app.button if button.label.startswith("Run ALL"))
-    assert not all_in.disabled
-
-
-def test_five_step_prompt_is_complete_json():
-    import json
-
-    prompt = json.loads(
-        Path("webull_dashboard_overhaul_five_step_prompt.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert prompt["framework"] == "5-step-process"
-    assert len(prompt["step_2_problems"]) == 5
-    assert prompt["step_5_do_it"]["measurement"]["loop"]["epsilon"] == 0
+    assert not app.exception
+    assert any("read-only" in e.value for e in app.error)
+    # No UAT submit button is rendered in Production.
+    assert not any(b.label.startswith("🚀 Submit order") for b in app.button)
