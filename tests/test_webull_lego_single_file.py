@@ -1,222 +1,137 @@
+"""Tests for the standalone one-new-row runner + parity with the engine."""
+
 from __future__ import annotations
 
-from pathlib import Path
-import subprocess
-import sys
-from types import SimpleNamespace
-from unittest.mock import Mock
-
 import numpy as np
-import pandas as pd
-from pandas.testing import assert_frame_equal
-import webull_lego_single_file as single_file
+import pytest
 
-from lego_pipeline import (
-    PipelineContext,
-    final_dataframe,
-    prepare_raw_frame,
-    run_stage,
-)
-
-from webull_lego_single_file import (
-    ENDPOINTS,
-    FINAL_COLUMNS,
-    WebullReadOnlyClient,
-    WebullSettings,
-    _redact,
-    decode_dna,
-    parse_dna_spec,
-    run_dataframe_chain,
+import webull_lego_single_file as sf
+from lego_one_row import (
+    CurrentSnapshot,
+    PreviousAnchor,
+    RunContext,
+    StrategyParameters,
+    compute_chain_key,
+    compute_row,
+    compute_run_id,
 )
 
 
-def _response(payload):
-    response = Mock(status_code=200)
-    response.json.return_value = payload
-    return response
+# --------------------------------------------------------------------------- #
+# DNA + extraction helpers
+# --------------------------------------------------------------------------- #
+def test_bypass_dna_is_all_ones():
+    dna, summary = sf.decode_dna("bypass:5")
+    assert list(dna) == [1, 1, 1, 1, 1]
+    assert summary["mode"] == "bypass"
 
 
-def test_encoded_dna_uses_width_value_seed_and_every_mutation_seed():
-    # Encodes [length=8, rate=25%, dna_seed=42, mutation_seed=7].
-    encoded = "1822524217"
-    spec = parse_dna_spec(encoded)
-    actual, metadata = decode_dna(encoded)
-
-    expected = np.random.default_rng(42).integers(0, 2, size=8).astype(np.int8)
-    expected[0] = 1
-    mask = np.random.default_rng(7).random(8) < 0.25
-    expected[mask] = 1 - expected[mask]
-    expected[0] = 1
-
-    assert spec.length == 8
-    assert spec.mutation_rate == 0.25
-    assert spec.dna_seed == 42
-    assert spec.mutation_seeds == (7,)
-    assert np.array_equal(actual, expected)
-    assert metadata["mode"] == "encoded"
-    assert metadata["seeds"] == [42, 7]
+def test_extract_holdings_and_price():
+    positions = {"positions": [{"symbol": "AAPL", "quantity": "7"}]}
+    quote = {"symbol": "AAPL", "last_price": "42.5"}
+    assert sf.extract_holdings(positions, "aapl") == 7.0
+    assert sf.extract_price(quote, "aapl") == 42.5
 
 
-def test_bypass_formats_are_explicit_all_ones_sequences():
-    for code in ("bypass:4", "[1,4]"):
-        dna, metadata = decode_dna(code)
-        assert dna.tolist() == [1, 1, 1, 1]
-        assert metadata["mode"] == "bypass"
+def test_missing_position_is_zero():
+    assert sf.extract_holdings({"positions": []}, "AAPL") == 0.0
 
 
-def test_chain_prefers_logged_signal_then_decodes_only_missing_rows():
-    raw = pd.DataFrame(
-        [
-            {"created_at": "2026-01-01T00:00:00Z", "dna_step": 0, "dna_signal": 0},
-            {"created_at": "2026-01-01T00:05:00Z", "dna_step": 1},
-            {"created_at": "2026-01-01T00:10:00Z", "dna_step": 1, "dna_signal": 2},
-        ]
+# --------------------------------------------------------------------------- #
+# One-row computation
+# --------------------------------------------------------------------------- #
+def test_genesis_row_baseline_zero():
+    row = sf.compute_one_row(
+        symbol="AAPL", price=100.0, holdings=3.0, captured_at="t0", anchor=None, fix_c=1500.0
     )
-    result = run_dataframe_chain(raw, 1500.0, "bypass:2")
+    cols = row["columns"]
+    assert cols["DNA step"] == 0
+    assert cols["สถานะ"] == "READY_BUY"
+    assert cols["Rₙ อ้างอิง (USD)"] == 0.0
+    assert cols["Aₙ สะสม (USD)"] == 0.0
+    assert row["metadata"]["p0"] == 100.0
 
-    chronological = result.accumulated[5]["DNA signal"].tolist()
-    assert chronological[:2] == [0, 1]
-    assert pd.isna(chronological[2])
-    assert tuple(result.final.columns) == FINAL_COLUMNS
+
+def test_dna_zero_forces_pass(monkeypatch):
+    # Force the decoded DNA to place a 0 at step 0 so PASS_DNA_ZERO triggers.
+    monkeypatch.setattr(sf, "decode_dna", lambda code: (np.array([0, 1], dtype=np.int8), {}))
+    row = sf.compute_one_row(
+        symbol="AAPL", price=100.0, holdings=3.0, captured_at="t0", anchor=None, fix_c=1500.0
+    )
+    assert row["columns"]["สถานะ"] == "PASS_DNA_ZERO"
+    assert row["columns"]["คำสั่ง"] == "PASS"
 
 
-def test_real_sdk_adapter_calls_read_endpoints_for_test_and_production():
-    for environment, endpoint in ENDPOINTS.items():
-        settings = WebullSettings(environment, "account", "key", "secret")
-        account_v2 = Mock()
-        market_data = Mock()
-        account_v2.get_account_list.return_value = _response({"accounts": []})
-        account_v2.get_account_balance.return_value = _response({"balance": "100"})
-        account_v2.get_account_position.return_value = _response({"positions": []})
-        market_data.get_snapshot.return_value = _response({"symbol": "AAPL", "price": "200"})
-        client = WebullReadOnlyClient.__new__(WebullReadOnlyClient)
-        client.settings = settings
-        client.trade = SimpleNamespace(account_v2=account_v2)
-        client.data = SimpleNamespace(market_data=market_data)
-
-        assert client.account_list() == {"accounts": []}
-        assert client.balance() == {"balance": "100"}
-        assert client.positions() == {"positions": []}
-        assert client.quote("aapl") == {"symbol": "AAPL", "price": "200"}
-        assert settings.endpoint == endpoint
-        account_v2.get_account_balance.assert_called_once_with("account")
-        account_v2.get_account_position.assert_called_once_with("account")
-        market_data.get_snapshot.assert_called_once_with(
-            "AAPL",
-            "US_STOCK",
-            extend_hour_required=False,
-            overnight_required=False,
+def test_dna_exhausted_raises():
+    anchor = {"dna_step": 5, "p0": 100.0, "prev_price": 100.0, "prev_actual": 0.0}
+    with pytest.raises(ValueError):
+        sf.compute_one_row(
+            symbol="AAPL", price=100.0, holdings=1.0, captured_at="t", anchor=anchor,
+            fix_c=1500.0, dna_code="bypass:2",
         )
 
 
-def test_live_step_zero_orchestrates_every_real_read_contract(monkeypatch):
-    fake = Mock()
-    fake.account_list.return_value = {"account_id": "secret-account"}
-    fake.balance.return_value = {"cash": "100"}
-    fake.positions.return_value = {"positions": [{"symbol": "AAPL", "quantity": "2"}]}
-    fake.quote.return_value = {"symbol": "AAPL", "price": "200"}
-    db = object()
-    raw = pd.DataFrame([{"symbol": "AAPL", "created_at": "2026-01-01T00:00:00Z"}])
-    monkeypatch.setattr(single_file, "WebullReadOnlyClient", lambda settings: fake)
-    monkeypatch.setattr(single_file, "_firestore_client", lambda firebase_info: db)
-    monkeypatch.setattr(
-        single_file,
-        "load_firestore_rows",
-        lambda actual_db, collection, limit: raw,
+def test_present_row_rounds_financials_only():
+    row = sf.compute_one_row(
+        symbol="AAPL", price=101.0, holdings=1.0, captured_at="t",
+        anchor={"dna_step": 0, "p0": 100.0, "prev_price": 100.0, "prev_actual": 0.0},
+        fix_c=1500.0,
     )
+    presented = sf.present_row(row["columns"])
+    assert presented["Rₙ อ้างอิง (USD)"] == round(row["columns"]["Rₙ อ้างอิง (USD)"], 2)
+    assert presented["DNA step"] == 1  # non-financial untouched (anchor step 0 -> 1)
 
-    live = single_file.load_live_inputs(
-        WebullSettings("Production", "account", "key", "secret"),
-        firebase_info={"project_id": "project"},
-        collection="trades",
-        limit=10,
+
+# --------------------------------------------------------------------------- #
+# Parity: single file == engine for the same inputs
+# --------------------------------------------------------------------------- #
+def _engine_columns(price, holdings, anchor, fix_c, diff, dna_code, precision, captured_at):
+    params = StrategyParameters(fix_c=fix_c, diff=diff, dna_code=dna_code, decimal_precision=precision)
+    snap = CurrentSnapshot(
+        environment="Test (UAT)", account_fingerprint="fp", symbol="AAPL",
+        price=price, holdings=holdings, captured_at=captured_at,
     )
-
-    fake.account_list.assert_called_once_with()
-    fake.balance.assert_called_once_with()
-    fake.positions.assert_called_once_with()
-    fake.quote.assert_called_once_with("AAPL")
-    assert live.firestore_client is db
-    assert live.raw.equals(raw)
-    assert live.safe_summary["environment"] == "Production"
-    assert live.safe_summary["api_reads"] == [
-        "account_list", "account_balance", "positions", "market_snapshot"
-    ]
-    assert live.safe_summary["account_list"]["account_id"] == "[REDACTED]"
+    chain_key = compute_chain_key(snap.environment, snap.account_fingerprint, snap.symbol, params)
+    run_id = compute_run_id(chain_key, anchor, snap)
+    ctx = RunContext(run_id=run_id, chain_key=chain_key, snapshot=snap, anchor=anchor, params=params)
+    return compute_row(ctx).columns
 
 
-def test_single_file_has_no_project_local_imports_or_mutation_methods():
-    source = Path("webull_lego_single_file.py").read_text(encoding="utf-8")
-
-    for local_module in ("lego_pipeline", "manual_tools", "trade_log", "lego_uat"):
-        assert f"import {local_module}" not in source
-        assert f"from {local_module}" not in source
-    assert "place_order(" not in source
-    assert "cancel_order(" not in source
-    assert "get_account_list" in source
-    assert "get_account_balance" in source
-    assert "get_account_position" in source
-    assert "get_snapshot" in source
+def _assert_columns_equal(a, b):
+    assert set(a) == set(b)
+    for key in a:
+        va, vb = a[key], b[key]
+        if isinstance(va, float) or isinstance(vb, float):
+            assert va == pytest.approx(vb), key
+        else:
+            assert va == vb, key
 
 
-def test_single_file_help_runs_on_windows_legacy_console():
-    completed = subprocess.run(
-        [sys.executable, "webull_lego_single_file.py", "--help"],
-        capture_output=True,
-        timeout=30,
-        check=False,
+@pytest.mark.parametrize(
+    "price,holdings,fix_c,diff",
+    [
+        (100.0, 3.0, 1500.0, 0.0),   # BUY
+        (100.0, 20.0, 1500.0, 0.0),  # SELL
+        (100.0, 15.0, 1500.0, 10.0), # PASS_THRESHOLD
+    ],
+)
+def test_single_file_matches_engine_genesis(price, holdings, fix_c, diff):
+    engine_cols = _engine_columns(price, holdings, PreviousAnchor.genesis(), fix_c, diff, "bypass:100", 5, "t0")
+    sf_cols = sf.compute_one_row(
+        symbol="AAPL", price=price, holdings=holdings, captured_at="t0", anchor=None,
+        fix_c=fix_c, diff=diff, dna_code="bypass:100", decimal_precision=5,
+    )["columns"]
+    _assert_columns_equal(engine_cols, sf_cols)
+
+
+def test_single_file_matches_engine_anchored():
+    engine_anchor = PreviousAnchor(
+        exists=True, version=3, row_id="r", dna_step=3, p0=100.0, prev_price=110.0, prev_actual=40.0
     )
-
-    assert completed.returncode == 0
-    assert b"Test (UAT)" in completed.stdout
-    assert b"Production" in completed.stdout
-
-
-def test_single_file_redacts_nested_account_and_credentials():
-    safe = _redact(
-        {
-            "securities_account_id": "123",
-            "account_no": "456",
-            "nested": {"appSecret": "secret", "symbol": "AAPL"},
-        }
-    )
-
-    assert safe["securities_account_id"] == "[REDACTED]"
-    assert safe["account_no"] == "[REDACTED]"
-    assert safe["nested"] == {"appSecret": "[REDACTED]", "symbol": "AAPL"}
-
-
-def test_single_file_final_contract_matches_the_manual_stage_engine():
-    raw = pd.DataFrame(
-        [
-            {
-                "created_at": "2026-01-01T00:00:00Z",
-                "symbol": "aapl",
-                "status": "ORDER_FILLED",
-                "dna_step": 0,
-                "dna_signal": 1,
-                "last_price": 100.0,
-                "quantity": 10.0,
-                "decision_action": "SELL",
-                "decision_side": "SELL",
-                "decision_reason": "ABOVE_TARGET",
-                "decision_order_qty": 1.0,
-                "decision_value_now_usd": 1000.0,
-                "client_order_id": "order-1",
-                "filled_quantity": 1.0,
-                "execution_price": 101.0,
-                "position_reconciled": True,
-                "transaction_fee": 0.25,
-            }
-        ]
-    )
-    single = run_dataframe_chain(raw, 1000.0, "bypass:1").final
-
-    prepared = prepare_raw_frame(raw)
-    context = PipelineContext(fix_c=1000.0, dna_code="bypass:1")
-    previous = None
-    for step in range(1, 18):
-        previous = run_stage(step, prepared, previous, context)
-    manual = final_dataframe(previous)
-
-    assert_frame_equal(single, manual, check_dtype=False)
+    sf_anchor = {"dna_step": 3, "p0": 100.0, "prev_price": 110.0, "prev_actual": 40.0}
+    engine_cols = _engine_columns(121.0, 5.0, engine_anchor, 1500.0, 0.0, "bypass:100", 5, "t1")
+    sf_cols = sf.compute_one_row(
+        symbol="AAPL", price=121.0, holdings=5.0, captured_at="t1", anchor=sf_anchor,
+        fix_c=1500.0, diff=0.0, dna_code="bypass:100", decimal_precision=5,
+    )["columns"]
+    _assert_columns_equal(engine_cols, sf_cols)
