@@ -301,7 +301,7 @@ def test_order_survives_a_denied_firestore_audit_write(monkeypatch):
     app = _authenticated_app("Test (UAT)")
     app.session_state["lego_db"] = _AuditDeniedDB()
     app.session_state["lego_config"] = types.SimpleNamespace(
-        audit_collection="webull_lego_uat_audit"
+        audit_collection="webull_lego_uat_audit", audit_to_firestore=True
     )
     app.run(timeout=30)
 
@@ -348,8 +348,10 @@ def test_read_only_deployment_can_opt_out_of_firestore_audit(monkeypatch):
 
 
 def test_audit_to_firestore_flag_parses_from_secrets():
-    from lego_dashboard import _coerce_bool
+    from lego_dashboard import LegoDashboardConfig, _coerce_bool
 
+    # Firestore is read-only by default (matches the original dashboard/Manual).
+    assert LegoDashboardConfig(firebase_info={}).audit_to_firestore is False
     assert _coerce_bool(False) is False
     assert _coerce_bool(True) is True
     assert _coerce_bool("false") is False

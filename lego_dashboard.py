@@ -80,9 +80,11 @@ class LegoDashboardConfig:
     audit_collection: str = "webull_lego_uat_audit"
     trade_limit: int = 100
     fix_c: float = 1500.0
-    # Set false when the service account is read-only: audit stays session-only
-    # (downloadable) and no Firestore write is attempted, so no permission noise.
-    audit_to_firestore: bool = True
+    # Firestore is read-only by default, exactly like the rest of the app (the
+    # original dashboard/Manual only ever `.get()` the trade log).  Audit stays
+    # session-only and downloadable; opt in to Firestore writes only when the
+    # service account actually has write permission on the audit collection.
+    audit_to_firestore: bool = False
 
 
 def _secret_section(name: str) -> dict[str, Any]:
@@ -112,7 +114,7 @@ def load_dashboard_config() -> LegoDashboardConfig:
         ).strip(),
         trade_limit=trade_limit,
         fix_c=fix_c,
-        audit_to_firestore=_coerce_bool(lego.get("audit_to_firestore", True)),
+        audit_to_firestore=_coerce_bool(lego.get("audit_to_firestore", False)),
     )
 
 
