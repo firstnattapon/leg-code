@@ -1,89 +1,87 @@
-"""Webull LEGO Chain — a manually-run, 17-stage Streamlit learning app."""
+"""Webull LEGO Chain — a manually-run, one-new-row Streamlit learning app.
+
+A single authenticated run reads one immutable Webull snapshot (positions +
+quote — never the ``shannon_demon_trades`` log) and the latest recurrence anchor
+of the same chain, computes exactly one new 17-column row, and — only at Step
+18 — appends it transactionally.  Preview/Submit is available afterwards for the
+committed row, UAT only; Production is read-only.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import importlib
 import json
 from pathlib import Path
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 import streamlit as st
-from google.cloud import firestore
 
-# Streamlit Cloud can hot-reload this entry point without evicting an older
-# lego_pipeline module.  Reload it before importing names when the StageSpec
-# contract is stale, so ``stage.goal/source_code/file_name`` always move as one
-# compatible unit.
-import lego_pipeline as _lego_pipeline
+import lego_one_row as _engine
 
-EXPECTED_PIPELINE_SCHEMA_VERSION = 3
-if (
-    getattr(_lego_pipeline, "PIPELINE_SCHEMA_VERSION", 0)
-    != EXPECTED_PIPELINE_SCHEMA_VERSION
-):
-    _lego_pipeline = importlib.reload(_lego_pipeline)
+EXPECTED_ONE_ROW_SCHEMA_VERSION = 1
+if getattr(_engine, "ONE_ROW_SCHEMA_VERSION", 0) != EXPECTED_ONE_ROW_SCHEMA_VERSION:
+    import importlib
 
-from lego_pipeline import (
+    _engine = importlib.reload(_engine)
+
+from lego_one_row import (
+    DECISION_STAGE,
     FINAL_COLUMNS,
-    INTERNAL_ROW_ID,
-    PipelineContext,
-    STAGES,
-    StageResult,
-    dataframe_fingerprint,
-    final_dataframe,
-    invalidate_from,
-    prepare_raw_frame,
-    run_stage,
-    what_if_dataframe,
+    STAGE_SPECS,
+    STATUS_READY_BUY,
+    STATUS_READY_SELL,
+    ComputedRow,
+    RunContext,
+    StrategyParameters,
+    account_fingerprint,
+    anchor_from_state,
+    build_final_document,
+    build_snapshot,
+    compute_chain_key,
+    compute_row,
+    compute_run_id,
+    present_row,
+    present_value,
+)
+from lego_state import (
+    ORDER_AUDIT_COLLECTION,
+    FirestoreStateStore,
+    StaleAnchorError,
+    finalize_row,
+    read_anchor_state,
 )
 from manual_tools import (
+    DEFAULT_ORDER_DECIMAL_PRECISION,
     WEBULL_ENDPOINTS,
     ConnectionSettings,
     WebullManualClient,
     build_market_order_payload,
     generate_client_order_id,
 )
-from lego_uat import (
-    account_fingerprint,
-    build_audit_event,
-    redact_payload,
-)
+from lego_uat import build_audit_event, redact_payload
 from lego_orders import (
     PRODUCTION_ENVIRONMENT,
     evaluate_submit_gate,
     order_confirmation_phrase,
     summarize_order_result,
 )
-from webull_lego_single_file import (
-    WebullSettings,
-    decode_dna as decode_guide_dna,
-    load_live_inputs,
-)
 
 
-st.set_page_config(
-    page_title="Webull LEGO Chain",
-    page_icon="🧱",
-    layout="wide",
-)
+st.set_page_config(page_title="Webull LEGO Chain", page_icon="🧱", layout="wide")
 
 
 @dataclass(frozen=True)
 class LegoDashboardConfig:
     firebase_info: dict[str, Any]
-    trade_collection: str = "shannon_demon_trades"
-    audit_collection: str = "webull_lego_uat_audit"
-    trade_limit: int = 100
+    order_audit_collection: str = ORDER_AUDIT_COLLECTION
     fix_c: float = 1500.0
-    # Firestore is read-only by default, exactly like the rest of the app (the
-    # original dashboard/Manual only ever `.get()` the trade log).  Audit stays
-    # session-only and downloadable; opt in to Firestore writes only when the
-    # service account actually has write permission on the audit collection.
+    diff: float = 0.0
+    dna_code: str = "bypass:100"
+    decimal_precision: int = DEFAULT_ORDER_DECIMAL_PRECISION
     audit_to_firestore: bool = False
 
 
@@ -94,324 +92,206 @@ def _secret_section(name: str) -> dict[str, Any]:
         return {}
 
 
-def load_dashboard_config() -> LegoDashboardConfig:
-    firebase_info = _secret_section("firebase_service_account")
-    lego = _secret_section("lego_dashboard")
-    try:
-        trade_limit = max(1, min(1000, int(lego.get("trade_limit", 100))))
-        fix_c = float(lego.get("fix_c", 1500.0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("lego_dashboard.trade_limit/fix_c must be numeric") from exc
-    if fix_c <= 0:
-        raise ValueError("lego_dashboard.fix_c must be greater than 0")
-    return LegoDashboardConfig(
-        firebase_info=firebase_info,
-        trade_collection=str(
-            lego.get("trade_collection", "shannon_demon_trades")
-        ).strip(),
-        audit_collection=str(
-            lego.get("audit_collection", "webull_lego_uat_audit")
-        ).strip(),
-        trade_limit=trade_limit,
-        fix_c=fix_c,
-        audit_to_firestore=_coerce_bool(lego.get("audit_to_firestore", False)),
-    )
-
-
 def _coerce_bool(value: Any) -> bool:
-    """Accept native TOML booleans and common string spellings."""
-
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def connection_fingerprint(
-    settings: ConnectionSettings, *, symbol: str = "", dna_code: str = ""
-) -> str:
-    payload = "\x00".join(
-        (
-            settings.environment,
-            settings.account_id,
-            settings.app_key,
-            settings.app_secret,
-            settings.region,
-            symbol.strip().upper(),
-            dna_code.strip(),
-        )
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def make_audit_event(
-    *,
-    action: str,
-    settings: ConnectionSettings,
-    request_summary: dict[str, Any],
-    result: Any | None,
-    elapsed_ms: float,
-    error: Exception | None = None,
-) -> dict[str, Any]:
-    return build_audit_event(
-        action=action,
-        environment=settings.environment,
-        account_id=settings.account_id,
-        session_run_id=st.session_state.get("lego_session_run_id", "unknown"),
-        request_summary=request_summary,
-        result=result,
-        elapsed_ms=elapsed_ms,
-        error=error,
-    )
-
-
-def record_audit(event: dict[str, Any]) -> str | None:
-    """Write sanitized audit best-effort and always keep a session download copy.
-
-    The session copy (``lego_audit_events``) is the source of truth and is always
-    retained for download.  Persisting to Firestore is a bonus: if the service
-    account lacks write permission on the audit collection it fails **once**, we
-    fall back to session-only for the rest of the session, and — crucially — the
-    order API result is never affected or hidden.
-    """
-
-    st.session_state.setdefault("lego_audit_events", []).append(event)
-    # Session-only audit is a valid, non-error state (kept + downloadable).
-    if st.session_state.get("lego_audit_firestore_off"):
-        return None
-    db = st.session_state.get("lego_db")
-    config = st.session_state.get("lego_config")
-    if db is None or config is None:
-        return None
-    # Read-only deployments opt out entirely: session audit only, no write, no noise.
-    if not getattr(config, "audit_to_firestore", True):
-        return None
+def load_dashboard_config() -> LegoDashboardConfig:
+    firebase_info = _secret_section("firebase_service_account")
+    lego = _secret_section("lego_dashboard")
     try:
-        db.collection(config.audit_collection).document(event["event_id"]).set(event)
-    except Exception as exc:  # audit failure must not hide an API result
-        # Stop retrying this session so the notice appears once, not per action.
-        st.session_state["lego_audit_firestore_off"] = True
-        return (
-            "บันทึก audit ลง Firestore ไม่ได้ — order **ไม่ได้รับผลกระทบ** (ดูผลด้านบน) และ "
-            "audit ถูกเก็บใน session แล้ว ดาวน์โหลดได้ที่ Tab 18. เหตุผล: "
-            f"{exc.__class__.__name__}: {exc} · แก้โดยให้ service account เขียน "
-            f"collection `{config.audit_collection}` ได้ หรือปรับ Firestore security rules"
-        )
-    return None
-
-
-def clear_connection_state(*, clear_widgets: bool = True) -> None:
-    for key in (
-        "lego_raw",
-        "lego_results",
-        "lego_settings",
-        "lego_db",
-        "lego_auth_summary",
-        "lego_auth_fingerprint",
-        "lego_reference_csv",
-        "lego_use_csv_source",
-        "lego_symbol",
-        "lego_dna_code",
-        "lego_all_in_status",
-        "lego_uat_preview",
-        "lego_uat_output",
-        "lego_audit_events",
-        "lego_audit_firestore_off",
-    ):
-        st.session_state.pop(key, None)
-    # Any connection change must void a stale Preview so a live Submit can never
-    # reuse a payload that was validated under a different account/environment.
-    for key in list(st.session_state.keys()):
-        if str(key).startswith("order_") and str(key).endswith(
-            ("_preview_state", "_output")
-        ):
-            st.session_state.pop(key, None)
-    if clear_widgets:
-        for key in list(st.session_state.keys()):
-            if str(key).startswith("order_"):
-                st.session_state.pop(key, None)
-        for key in (
-            "lego_account_id",
-            "lego_app_key",
-            "lego_app_secret",
-            "lego_symbol_input",
-            "lego_dna_code_input",
-            "lego_submit_confirmation",
-            "lego_cancel_confirmation",
-        ):
-            st.session_state[key] = ""
-
-
-def _download_json(value: Any) -> bytes:
-    return json.dumps(
-        redact_payload(value), ensure_ascii=False, indent=2, default=str
-    ).encode("utf-8")
-
-
-def _real_webull_settings(settings: ConnectionSettings) -> WebullSettings:
-    """Translate UI settings to the standalone read-only SDK contract."""
-
-    return WebullSettings(
-        environment=settings.environment,
-        account_id=settings.account_id,
-        app_key=settings.app_key,
-        app_secret=settings.app_secret,
-        region=settings.region,
+        fix_c = float(lego.get("fix_c", 1500.0))
+        diff = float(lego.get("diff", 0.0))
+        precision = int(lego.get("decimal_precision", DEFAULT_ORDER_DECIMAL_PRECISION))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("lego_dashboard fix_c/diff/decimal_precision must be numeric") from exc
+    if fix_c <= 0:
+        raise ValueError("lego_dashboard.fix_c must be greater than 0")
+    if diff < 0:
+        raise ValueError("lego_dashboard.diff cannot be negative")
+    return LegoDashboardConfig(
+        firebase_info=firebase_info,
+        order_audit_collection=str(
+            lego.get("order_audit_collection", ORDER_AUDIT_COLLECTION)
+        ).strip(),
+        fix_c=fix_c,
+        diff=diff,
+        dna_code=str(lego.get("dna_code", "bypass:100")).strip() or "bypass:100",
+        decimal_precision=precision,
+        audit_to_firestore=_coerce_bool(lego.get("audit_to_firestore", False)),
     )
 
 
-def resolve_chain_source(
-    firestore_raw: pd.DataFrame,
-    reference: pd.DataFrame | None,
-    *,
-    use_csv_as_source: bool,
-) -> tuple[pd.DataFrame, str]:
-    """Pick the tabular rows the LEGO chain will transform.
+# --------------------------------------------------------------------------- #
+# Firestore + Step 0 reads
+# --------------------------------------------------------------------------- #
+def _make_firestore_client(firebase_info: dict[str, Any]):
+    from google.cloud import firestore
+    from google.oauth2 import service_account
 
-    The chain's table is built **only** from trade-log rows.  By default that is
-    the Firestore ``shannon_demon_trades`` log.  The live Webull API reads
-    (account/balance/positions/quote) authenticate the session and populate the
-    summary, but are never turned into chain rows — so an empty trade log yields
-    an empty Final DataFrame even though every step "succeeds".  When the user
-    explicitly opts in and a non-empty CSV is uploaded, that CSV becomes the
-    source so an empty Firestore log does not force an empty chain.
-    """
-
-    if (
-        use_csv_as_source
-        and isinstance(reference, pd.DataFrame)
-        and not reference.empty
-    ):
-        return reference, "uploaded_csv"
-    return firestore_raw, "firestore_trade_log"
+    if firebase_info:
+        credentials = service_account.Credentials.from_service_account_info(firebase_info)
+        return firestore.Client(credentials=credentials, project=firebase_info["project_id"])
+    return firestore.Client()
 
 
-def authenticate_and_load(
+def _build_strategy_params(config: LegoDashboardConfig, dna_code: str) -> StrategyParameters:
+    return StrategyParameters(
+        fix_c=config.fix_c,
+        diff=config.diff,
+        dna_code=dna_code or config.dna_code,
+        decimal_precision=config.decimal_precision,
+    )
+
+
+def connect_and_prepare_run(
     settings: ConnectionSettings,
     config: LegoDashboardConfig,
     *,
     symbol: str,
     dna_code: str,
-) -> tuple[pd.DataFrame, firestore.Client, dict[str, Any]]:
-    """Run real Step 0 reads; this is shared by Connect and All-in."""
+) -> tuple[RunContext, Any, ComputedRow, dict[str, Any]]:
+    """Real Step 0: one immutable Webull snapshot + latest chain anchor.
+
+    Reads Account list / Balance / Positions / Quote once and the chain's latest
+    state pointer.  It never queries ``shannon_demon_trades`` or any trade log.
+    """
 
     settings.validate()
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol:
+        raise ValueError("Symbol is required — the new row's price comes from a live quote")
     if not config.firebase_info:
         raise ValueError("Missing [firebase_service_account] in Streamlit secrets")
-    dna_summary: dict[str, Any] = {"mode": "logged-only"}
-    if dna_code.strip():
-        dna, dna_summary = decode_guide_dna(dna_code)
-        dna_summary = {
-            **dna_summary,
-            "ones": int(dna.sum()),
-            "zeros": int(len(dna) - dna.sum()),
-            "preview_first_20": dna[:20].astype(int).tolist(),
-        }
-    live = load_live_inputs(
-        _real_webull_settings(settings),
-        firebase_info=config.firebase_info,
-        collection=config.trade_collection,
-        limit=config.trade_limit,
-        symbol=symbol,
+
+    params = _build_strategy_params(config, dna_code)  # validates DNA + config
+
+    client = WebullManualClient(settings)
+    account_list = client.get_account_list()
+    balance = client.get_account_balance()
+    position_and_price = client.get_position_and_price(normalized_symbol)
+    positions_response = position_and_price["position_response"]
+    quote_response = position_and_price["quote_response"]
+
+    snapshot = build_snapshot(
+        environment=settings.environment,
+        account_id=settings.account_id,
+        symbol=normalized_symbol,
+        positions_response=positions_response,
+        quote_response=quote_response,
     )
-    raw = prepare_raw_frame(live.raw)
+
+    db = _make_firestore_client(config.firebase_info)
+    store = FirestoreStateStore(db)
+    chain_key = compute_chain_key(
+        snapshot.environment, snapshot.account_fingerprint, snapshot.symbol, params
+    )
+    anchor = anchor_from_state(read_anchor_state(store, chain_key))
+    run_id = compute_run_id(chain_key, anchor, snapshot)
+    ctx = RunContext(
+        run_id=run_id, chain_key=chain_key, snapshot=snapshot, anchor=anchor, params=params
+    )
+    computed = compute_row(ctx)
+
     summary = {
-        **live.safe_summary,
+        "environment": settings.environment,
+        "endpoint": settings.endpoint,
+        "account_fingerprint": snapshot.account_fingerprint,
+        "symbol": snapshot.symbol,
+        "api_reads": ["account_list", "account_balance", "positions", "market_snapshot"],
+        "snapshot": {
+            "price": snapshot.price,
+            "holdings": snapshot.holdings,
+            "captured_at": snapshot.captured_at,
+        },
+        "chain": {
+            "chain_key": chain_key,
+            "run_id": run_id,
+            "anchor_exists": anchor.exists,
+            "anchor_version": anchor.version,
+            "next_dna_step": computed.columns["DNA step"],
+        },
+        "account_list": redact_payload(account_list),
+        "balance": redact_payload(balance),
+        "positions": redact_payload(positions_response),
+        "quote": redact_payload(quote_response),
         "firestore_project": config.firebase_info.get("project_id"),
-        "dna_decoder": dna_summary,
+        "old_trade_log_reads": 0,
     }
-    return raw, live.firestore_client, summary
+    return ctx, store, computed, summary
 
 
-def run_all_pipeline_stages(
-    raw: pd.DataFrame,
-    config: LegoDashboardConfig,
-    *,
-    dna_code: str,
-    on_step: Callable[[int], None] | None = None,
-) -> dict[int, StageResult]:
-    """Run pure Steps 1→17 and prove Step 18 can be materialized."""
-
-    results: dict[int, StageResult] = {}
-    context = PipelineContext(
-        fix_c=config.fix_c,
-        source_hash=dataframe_fingerprint(raw),
-        dna_code=dna_code,
-    )
-    previous = None
-    for stage_number in range(1, 18):
-        result = run_stage(stage_number, raw, previous, context)
-        results[stage_number] = result
-        previous = result
-        if on_step is not None:
-            on_step(stage_number)
-    final_dataframe(results[17])
-    what_if_dataframe(results[17], config.fix_c)
-    if on_step is not None:
-        on_step(18)
-    return results
+def clear_run_state() -> None:
+    for key in (
+        "lego_ctx",
+        "lego_store",
+        "lego_computed",
+        "lego_revealed",
+        "lego_commit_result",
+        "lego_auth_summary",
+        "lego_settings",
+        "lego_order_audit_events",
+    ):
+        st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("order_"):
+            st.session_state.pop(key, None)
 
 
-def _order_defaults_from_row(stage_result: StageResult | None) -> tuple[str, str, float]:
-    """Prefill order inputs from the latest chain row — convenience only."""
+# --------------------------------------------------------------------------- #
+# Draft-row presentation
+# --------------------------------------------------------------------------- #
+def draft_row_frame(computed: ComputedRow, revealed: int) -> pd.DataFrame:
+    """One-row DataFrame with the columns revealed so far, presented for display."""
 
-    default_symbol = str(st.session_state.get("lego_symbol", "") or "")
-    default_side = "BUY"
-    default_quantity = 1.0
-    if stage_result is not None and not stage_result.frame.empty:
-        latest = stage_result.frame.iloc[-1]
-        symbol = str(latest.get("สินทรัพย์", "") or "").strip()
-        if symbol:
-            default_symbol = symbol
-        side = str(latest.get("ฝั่ง", "") or "").strip().upper()
-        if side in ("BUY", "SELL"):
-            default_side = side
-        raw_quantity = pd.to_numeric(
-            pd.Series([latest.get("จำนวนสั่ง (หุ้น)")]), errors="coerce"
-        ).iloc[0]
-        if pd.notna(raw_quantity) and raw_quantity > 0:
-            default_quantity = float(raw_quantity)
-    return default_symbol.upper(), default_side, default_quantity
+    revealed = max(0, min(17, int(revealed)))
+    row: dict[str, Any] = {}
+    for index in range(revealed):
+        name = FINAL_COLUMNS[index]
+        value = computed.columns[name]
+        if name == "สถานะ" and revealed < DECISION_STAGE:
+            value = _engine.STATUS_SNAPSHOT_READY
+        row[name] = present_value(name, value)
+    return pd.DataFrame([row]) if row else pd.DataFrame()
 
 
-def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None, str]:
-    """Return a (message, streamlit-level) badge that never mislabels a fill."""
+def final_row_frame(computed: ComputedRow) -> pd.DataFrame:
+    return pd.DataFrame([present_row(computed.columns)])
 
-    status = summary_view.get("status")
-    category = summary_view.get("status_category")
-    order_id = summary_view.get("order_id")
-    label = status or category
-    if action == "PREVIEW":
-        return ("Preview สำเร็จ — Webull ตรวจ payload แล้ว (ยังไม่ได้ส่งคำสั่ง)", "success")
-    if action == "CANCEL":
-        return (f"ส่งคำขอ Cancel แล้ว — สถานะจริง: {label}", "info")
-    if action == "SUBMIT":
-        if summary_view.get("is_filled"):
-            return (f"order_id={order_id} · FILLED", "success")
+
+# --------------------------------------------------------------------------- #
+# Order panel — UAT only, from the immutable committed final row
+# --------------------------------------------------------------------------- #
+def _record_order_audit(config: LegoDashboardConfig, event: dict[str, Any]) -> str | None:
+    st.session_state.setdefault("lego_order_audit_events", []).append(event)
+    store = st.session_state.get("lego_store")
+    if store is None or not getattr(config, "audit_to_firestore", False):
+        return None
+    if st.session_state.get("lego_audit_firestore_off"):
+        return None
+    try:
+        store.record_order_audit(event)
+    except Exception as exc:
+        st.session_state["lego_audit_firestore_off"] = True
         return (
-            f"ส่งคำสั่งแล้ว order_id={order_id} · สถานะจริง={label} — "
-            "ยังไม่ใช่ FILLED ห้ามนับเป็นเงินจริงจนกว่าจะยืนยัน fill",
-            "warning",
+            "บันทึก order audit ลง Firestore ไม่ได้ — order ไม่ได้รับผลกระทบ และ audit ถูกเก็บใน "
+            f"session แล้ว เหตุผล: {exc.__class__.__name__}: {exc}"
         )
-    if action == "QUERY":
-        if summary_view.get("is_filled"):
-            return (f"order_id={order_id} · FILLED", "success")
-        if summary_view.get("is_terminal"):
-            return (f"order_id={order_id} · terminal={label}", "warning")
-        return (f"order_id={order_id} · pending/working={label} — ยังไม่ filled", "info")
-    return (None, "info")
+    return None
 
 
 def _run_order_action(
     *,
     action: str,
     settings: ConnectionSettings,
-    summary: dict[str, Any],
-    call: Callable[[], Any],
+    config: LegoDashboardConfig,
+    request_summary: dict[str, Any],
+    call,
     prefix: str,
     store_preview: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Execute one real Webull order call, redact, badge, and audit it."""
-
+) -> None:
     started = time.perf_counter()
     try:
         result = call()
@@ -420,155 +300,92 @@ def _run_order_action(
         summary_view = summarize_order_result(safe_result)
         if store_preview is not None:
             st.session_state[f"{prefix}_preview_state"] = dict(store_preview)
-        badge, level = _order_badge(action, summary_view)
         st.session_state[f"{prefix}_output"] = {
             "action": action,
             "result": {"summary": summary_view, "raw": safe_result},
-            "badge": badge,
-            "level": level,
         }
-        warning = record_audit(
-            make_audit_event(
+        warning = _record_order_audit(
+            config,
+            build_audit_event(
                 action=action,
-                settings=settings,
-                request_summary=summary,
+                environment=settings.environment,
+                account_id=settings.account_id,
+                session_run_id=st.session_state.get("lego_session_run_id", "unknown"),
+                request_summary=request_summary,
                 result=safe_result,
                 elapsed_ms=elapsed,
-            )
+            ),
         )
         if warning:
             st.warning(warning)
-        return summary_view
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
-        warning = record_audit(
-            make_audit_event(
+        warning = _record_order_audit(
+            config,
+            build_audit_event(
                 action=action,
-                settings=settings,
-                request_summary=summary,
+                environment=settings.environment,
+                account_id=settings.account_id,
+                session_run_id=st.session_state.get("lego_session_run_id", "unknown"),
+                request_summary=request_summary,
                 result=None,
                 elapsed_ms=elapsed,
                 error=exc,
-            )
+            ),
         )
         if warning:
             st.warning(warning)
         st.error(f"{exc.__class__.__name__}: {exc}")
-        return None
 
 
-def render_order_panel(
-    tab_key: str,
-    config: LegoDashboardConfig,
-    *,
-    default_symbol: str = "",
-    default_side: str = "BUY",
-    default_quantity: float = 1.0,
-) -> None:
-    """Guarded real-order control shared by every tab: Preview → Place → Query.
-
-    UAT hits the real UAT endpoint.  Production is fail-closed behind a safety
-    switch, a retyped confirmation phrase (which re-states account/symbol/side/
-    quantity), and a Preview whose payload must match the one being placed.
-    """
+def render_order_panel(config: LegoDashboardConfig) -> None:
+    """Preview/Submit for the committed final row — UAT only, Production locked."""
 
     st.divider()
-    with st.expander("🔴 ส่งคำสั่งซื้อขายจริงผ่าน Webull Order API", expanded=False):
-        _render_order_panel_body(
-            tab_key,
-            config,
-            default_symbol=default_symbol,
-            default_side=default_side,
-            default_quantity=default_quantity,
-        )
-
-
-def _render_order_panel_body(
-    tab_key: str,
-    config: LegoDashboardConfig,
-    *,
-    default_symbol: str = "",
-    default_side: str = "BUY",
-    default_quantity: float = 1.0,
-) -> None:
-    """Body of :func:`render_order_panel`, rendered inside a collapsed expander."""
-
+    st.markdown("### 🔴 ส่งคำสั่งจาก final row (หลัง Step 18)")
     settings: ConnectionSettings | None = st.session_state.get("lego_settings")
-    if settings is None:
+    commit_result = st.session_state.get("lego_commit_result")
+    computed: ComputedRow | None = st.session_state.get("lego_computed")
+    ctx: RunContext | None = st.session_state.get("lego_ctx")
+    if settings is None or ctx is None or computed is None:
+        st.info("ต้อง Connect & Load ที่ Tab 0 ก่อน")
+        return
+    if commit_result is None:
+        st.info("ต้องกด Step 18 (append final row) ให้สำเร็จก่อน จึงจะ Preview/Submit ได้")
+        return
+
+    decision = computed.decision
+    is_production = settings.environment == PRODUCTION_ENVIRONMENT
+    if is_production:
+        st.error("โหมด Production เป็น read-only — ปิดการส่ง order เงินจริงไว้เสมอ (fail-closed)")
+        return
+    if decision.status not in (STATUS_READY_BUY, STATUS_READY_SELL):
         st.info(
-            "ต้องยืนยัน Webull ที่ Tab 0 (Connect & Load) ก่อนจึงจะ Preview/Submit order ได้"
+            f"final row เป็น {decision.status} — ไม่มี order ให้ส่ง (Preview/Submit เปิดเฉพาะ "
+            "READY_BUY / READY_SELL)"
         )
         return
 
-    is_production = settings.environment == PRODUCTION_ENVIRONMENT
+    symbol = ctx.snapshot.symbol
+    side = decision.side or "BUY"
+    quantity = float(decision.quantity)
+    st.warning("โหมด Test (UAT) — ยิง UAT endpoint จริง payload มาจาก final row ที่บันทึกแล้ว")
     st.caption(
-        f"Environment: {settings.environment} · {settings.endpoint} · "
-        f"Account #{account_fingerprint(settings.account_id)} · "
-        "ค่าเริ่มต้นมาจากแถวล่าสุดเพื่อช่วยกรอกเท่านั้น — ตรวจทุกค่าใหม่ก่อนยิง"
+        f"Account #{account_fingerprint(settings.account_id)} · {symbol} · {side} · {quantity} "
+        f"· run_id {ctx.run_id[:12]}… · ค่าเหล่านี้ล็อกจาก final row แก้ไม่ได้"
     )
-    if is_production:
-        st.error(
-            "โหมด Production — คำสั่งนี้เป็นเงินจริงและย้อนกลับไม่ได้ ต้องเปิด safety switch "
-            "และพิมพ์ confirmation phrase ให้ตรงก่อน Submit"
-        )
-    else:
-        st.warning("โหมด Test (UAT) — ยิง UAT endpoint จริง ไม่กระทบเงินจริง")
 
-    prefix = f"order_{tab_key}"
-    columns = st.columns(3)
-    with columns[0]:
-        symbol = (
-            st.text_input("Symbol", value=default_symbol, key=f"{prefix}_symbol")
-            .strip()
-            .upper()
-        )
-    with columns[1]:
-        side = st.selectbox(
-            "Side",
-            ["BUY", "SELL"],
-            index=0 if default_side != "SELL" else 1,
-            key=f"{prefix}_side",
-        )
-    with columns[2]:
-        quantity = st.number_input(
-            "Quantity (หุ้น)",
-            min_value=0.00001,
-            value=float(default_quantity),
-            step=1.0,
-            format="%.5f",
-            key=f"{prefix}_quantity",
-        )
-
+    prefix = f"order_{ctx.run_id[:8]}"
     trading_session = st.selectbox(
-        "Trading session",
-        ["CORE", "PRE", "AFTER", "OVERNIGHT"],
-        key=f"{prefix}_session",
+        "Trading session", ["CORE", "PRE", "AFTER", "OVERNIGHT"], key=f"{prefix}_session"
     )
-
-    coid_key = f"{prefix}_client_order_id"
-    if coid_key not in st.session_state:
-        st.session_state[coid_key] = generate_client_order_id(
-            "LEGO", symbol or "NA", side, tab_key, time.time_ns()
-        )
-    coid_cols = st.columns([3, 1])
-    with coid_cols[0]:
-        client_order_id = st.text_input("Client Order ID", key=coid_key).strip()
-    with coid_cols[1]:
-        st.button(
-            "🔄 id ใหม่",
-            key=f"{prefix}_new_coid",
-            on_click=lambda: st.session_state.update(
-                {
-                    coid_key: generate_client_order_id(
-                        "LEGO", symbol or "NA", side, tab_key, time.time_ns()
-                    )
-                }
-            ),
-        )
-
+    # Deterministic client_order_id from the immutable run identity.
+    client_order_id = generate_client_order_id(
+        "LEGO", symbol, account_fingerprint(settings.account_id), side, quantity, ctx.run_id
+    )
     try:
         payload = build_market_order_payload(
-            symbol, side, float(quantity), client_order_id, trading_session
+            symbol, side, quantity, client_order_id, trading_session
         )
         payload_hash = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -583,17 +400,19 @@ def _render_order_panel_body(
     request_summary = {
         "symbol": symbol,
         "side": side,
-        "quantity": float(quantity),
+        "quantity": quantity,
         "client_order_id": client_order_id,
         "trading_session": trading_session,
         "environment": settings.environment,
+        "run_id": ctx.run_id,
     }
 
     if st.button("Preview order", disabled=payload is None, key=f"{prefix}_preview"):
         _run_order_action(
             action="PREVIEW",
             settings=settings,
-            summary=request_summary,
+            config=config,
+            request_summary=request_summary,
             call=lambda: WebullManualClient(settings).preview_market_order(payload),
             store_preview={"payload_hash": payload_hash},
             prefix=prefix,
@@ -604,26 +423,15 @@ def _render_order_panel_body(
         preview and preview.get("payload_hash") == payload_hash and payload is not None
     )
 
-    safety_switch = True
-    if is_production:
-        safety_switch = st.checkbox(
-            "เปิด Production safety switch — ฉันยืนยันว่าจะยิงคำสั่งเงินจริง",
-            value=False,
-            key=f"{prefix}_safety",
-        )
-
     phrase = ""
-    confirmation = ""
     confirmation_ok = False
     if payload is not None:
         phrase = order_confirmation_phrase(
-            settings.environment, settings.account_id, side, symbol, float(quantity)
+            settings.environment, settings.account_id, side, symbol, quantity
         )
         st.markdown("**พิมพ์ confirmation phrase ให้ตรงเป๊ะก่อน Submit**")
         st.code(phrase, language=None)
-        confirmation = st.text_input(
-            "Confirmation phrase", value="", key=f"{prefix}_confirm"
-        )
+        confirmation = st.text_input("Confirmation phrase", value="", key=f"{prefix}_confirm")
         confirmation_ok = confirmation.strip() == phrase
 
     gate = evaluate_submit_gate(
@@ -631,241 +439,72 @@ def _render_order_panel_body(
         payload_valid=payload is not None,
         preview_matches=preview_matches,
         confirmation_ok=confirmation_ok,
-        safety_switch=safety_switch,
+        safety_switch=True,  # UAT has no production safety switch
     )
     if not gate.allowed:
         st.caption("ยังส่งไม่ได้: " + " · ".join(gate.reasons))
 
     if st.button(
-        "🚀 Submit order (REAL)",
+        "🚀 Submit order (UAT)",
         disabled=not gate.allowed,
         type="primary",
         key=f"{prefix}_submit",
     ):
-        if not gate.allowed or confirmation.strip() != phrase:
-            st.error("การยืนยันไม่ครบ — ยกเลิกการ Submit")
-        else:
-            _run_order_action(
-                action="SUBMIT",
-                settings=settings,
-                summary=request_summary,
-                call=lambda: WebullManualClient(settings).place_market_order(payload),
-                prefix=prefix,
-            )
-            # Force a fresh Preview + confirmation before any second submit.
-            st.session_state.pop(f"{prefix}_preview_state", None)
-
-    st.markdown("#### ตรวจสถานะคำสั่งจริง (Query)")
-    query_id = st.text_input(
-        "Client Order ID ที่จะ query", value=client_order_id, key=f"{prefix}_query_id"
-    ).strip()
-    if st.button("Query order status", disabled=not query_id, key=f"{prefix}_query"):
         _run_order_action(
-            action="QUERY",
+            action="SUBMIT",
             settings=settings,
-            summary={"client_order_id": query_id},
-            call=lambda: WebullManualClient(settings).get_order_detail(query_id),
+            config=config,
+            request_summary=request_summary,
+            call=lambda: WebullManualClient(settings).place_market_order(payload),
             prefix=prefix,
         )
-
-    with st.expander("ยกเลิกคำสั่ง (Cancel)"):
-        cancel_id = st.text_input(
-            "Client Order ID ที่จะ cancel", key=f"{prefix}_cancel_id"
-        ).strip()
-        cancel_phrase = (
-            f"CANCEL {'PROD' if is_production else 'UAT'} {cancel_id}"
-            if cancel_id
-            else ""
-        )
-        if cancel_id:
-            st.code(cancel_phrase, language=None)
-        cancel_confirm = st.text_input(
-            "พิมพ์คำยืนยัน Cancel", value="", key=f"{prefix}_cancel_confirm"
-        )
-        if st.button("Cancel order", disabled=not cancel_id, key=f"{prefix}_cancel"):
-            if cancel_confirm.strip() != cancel_phrase:
-                st.error("คำยืนยัน Cancel ไม่ตรง")
-            else:
-                _run_order_action(
-                    action="CANCEL",
-                    settings=settings,
-                    summary={"client_order_id": cancel_id},
-                    call=lambda: WebullManualClient(settings).cancel_order(cancel_id),
-                    prefix=prefix,
-                )
+        st.session_state.pop(f"{prefix}_preview_state", None)
 
     output = st.session_state.get(f"{prefix}_output")
     if output:
         st.markdown("#### ผลลัพธ์ล่าสุด (redacted)")
-        badge = output.get("badge")
-        if badge:
-            getattr(st, output.get("level", "info"))(badge)
         st.json(output.get("result"))
+
+    audit_events = st.session_state.get("lego_order_audit_events", [])
+    if audit_events:
         st.download_button(
-            "Download order output JSON",
-            data=_download_json(output.get("result")),
-            file_name=f"webull_lego_order_{tab_key}.json",
+            "Download sanitized order audit JSON",
+            data=json.dumps(
+                redact_payload(audit_events), ensure_ascii=False, indent=2, default=str
+            ).encode("utf-8"),
+            file_name="webull_lego_order_audit.json",
             mime="application/json",
-            key=f"{prefix}_download",
+            key=f"{prefix}_audit_download",
         )
 
-    st.markdown("#### Learning Guide — order lifecycle")
-    st.write(
-        "ลำดับที่ปลอดภัย: (1) ตรวจ payload → (2) Preview ให้ Webull ตรวจก่อน → "
-        "(3) พิมพ์ confirmation phrase + (Production) เปิด safety switch → "
-        "(4) Submit ยิง place_order จริง → (5) Query อ่านสถานะจริง · "
-        "สถานะ SUBMITTED/PENDING ไม่ใช่ FILLED และจะไม่ถูกนับเป็นเงินจริงจนกว่าจะมีหลักฐาน fill"
-    )
 
-
-def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
-    source_code = stage.source_code
-    st.subheader(f"Step {stage.number} — {stage.title}")
-    st.markdown(f"**Goal:** {stage.goal}")
-    st.info(f"Quick Start: {stage.quick_start}")
-    with st.expander(
-        "LEGO code block ที่จะรัน — Single File", expanded=False
-    ):
-        st.caption(
-            f"{stage.file_name} · คัดลอกหรือดาวน์โหลดไฟล์เดียวแล้วรันได้ · "
-            "ฟังก์ชัน transform ในไฟล์นี้คือ callable เดียวกับปุ่ม Run"
-        )
-        st.code(source_code, language="python")
-        st.download_button(
-            "Download Single-File LEGO Block",
-            data=source_code,
-            file_name=stage.file_name,
-            mime="text/x-python",
-            key=f"lego_download_stage_{stage.number}",
-        )
-
-    raw: pd.DataFrame | None = st.session_state.get("lego_raw")
-    results: dict[int, StageResult] = st.session_state.setdefault("lego_results", {})
-    ready = raw is not None and (
-        stage.number == 1 or (stage.number - 1) in results
-    )
-    if not ready:
-        prerequisite = "Tab 0" if stage.number == 1 else f"Step {stage.number - 1}"
-        st.warning(f"ยังรันไม่ได้ — ต้องให้ {prerequisite} สำเร็จก่อน")
-
-    if st.button(
-        f"Run LEGO Step {stage.number}",
-        disabled=not ready,
-        type="primary",
-        key=f"lego_run_stage_{stage.number}",
-    ):
-        assert raw is not None
-        invalidate_from(results, stage.number)
-        previous = results.get(stage.number - 1)
-        context = PipelineContext(
-            fix_c=config.fix_c,
-            source_hash=dataframe_fingerprint(raw),
-            dna_code=st.session_state.get("lego_dna_code", ""),
-        )
-        try:
-            results[stage.number] = run_stage(
-                stage.number, raw, previous, context
-            )
-        except Exception as exc:
-            st.error(f"{exc.__class__.__name__}: {exc}")
-
-    result = results.get(stage.number)
-    if result is not None:
-        st.success(
-            f"Step {stage.number} สำเร็จ — ส่ง accumulated dataframe ไป "
-            + (f"Step {stage.number + 1}" if stage.number < 17 else "Final DataFrame")
-        )
-        metrics = st.columns(3)
-        metrics[0].metric("Rows", len(result.frame))
-        metrics[1].metric("Columns built", len(result.frame.columns))
-        metrics[2].metric(
-            "Non-blank current column",
-            int(result.frame[stage.column_name].notna().sum()),
-        )
-        st.markdown("#### ผลลัพธ์สะสม")
-        st.dataframe(
-            result.frame.iloc[::-1].reset_index(drop=True),
-            use_container_width=True,
-        )
-        with st.expander("Diagnostics + provenance", expanded=True):
-            for diagnostic in result.diagnostics:
-                st.write(f"• {diagnostic}")
-            st.json(result.provenance)
-
-    with st.expander("คู่มือเรียนรู้ LEGO Block", expanded=result is not None):
-        st.write(stage.learning_guide)
-        st.caption(
-            "หลักคิด: input จากบล็อกก่อนหน้า → ฟังก์ชันบริสุทธิ์ → validation → "
-            "output หนึ่งคอลัมน์ → ส่ง accumulated dataframe ต่อ"
-        )
-
-    default_symbol, default_side, default_quantity = _order_defaults_from_row(result)
-    render_order_panel(
-        f"stage{stage.number}",
-        config,
-        default_symbol=default_symbol,
-        default_side=default_side,
-        default_quantity=default_quantity,
-    )
-
-
+# --------------------------------------------------------------------------- #
+# Tab 0 — authenticated connection + Step 0
+# --------------------------------------------------------------------------- #
 def render_auth_tab(config: LegoDashboardConfig) -> None:
-    st.subheader("Step 0 — Authenticated connection")
+    st.subheader("Step 0 — Authenticated snapshot + chain anchor")
     st.info(
-        "กรอก Webull credential ใน session นี้ แล้วกด Connect & Load เพื่อยืนยัน "
-        "Webull Account list + Balance + Positions + Quote และอ่าน Firestore trade log จริง"
+        "กด Connect & Load เพื่ออ่าน Webull Account/Balance/Positions/Quote ครั้งเดียว และอ่าน "
+        "latest final anchor ของ chain เดียวกัน — จากนั้นจะสร้าง draft row ใหม่ 1 แถว "
+        "(ไม่มีการอ่าน shannon_demon_trades)"
     )
     environment = st.selectbox(
-        "Environment",
-        options=list(WEBULL_ENDPOINTS),
-        index=0,
-        key="lego_environment",
-        help="Test/UAT เป็นค่าเริ่มต้น; Production อ่านได้แต่สั่งไม่ได้",
+        "Environment", options=list(WEBULL_ENDPOINTS), index=0, key="lego_environment"
     )
     st.code(WEBULL_ENDPOINTS[environment], language=None)
-    account_id = st.text_input(
-        "Account ID", value="", key="lego_account_id", autocomplete="off"
-    )
-    app_key = st.text_input(
-        "App Key",
-        value="",
-        type="password",
-        key="lego_app_key",
-        autocomplete="off",
-    )
-    app_secret = st.text_input(
-        "App Secret",
-        value="",
-        type="password",
-        key="lego_app_secret",
-        autocomplete="off",
-    )
+    account_id = st.text_input("Account ID", value="", key="lego_account_id", autocomplete="off")
+    app_key = st.text_input("App Key", value="", type="password", key="lego_app_key", autocomplete="off")
+    app_secret = st.text_input("App Secret", value="", type="password", key="lego_app_secret", autocomplete="off")
     symbol = st.text_input(
-        "Symbol สำหรับ Webull quote (optional)",
-        value="",
-        key="lego_symbol_input",
-        help="ถ้าเว้นว่าง จะใช้ symbol แรกจาก Firestore trade log",
+        "Symbol (จำเป็น — ราคา Pₙ มาจาก live quote ของ symbol นี้)", value="", key="lego_symbol_input"
     ).strip().upper()
     dna_code = st.text_input(
-        "DNA_CODE (encoded, bypass:N หรือ [1,N])",
-        value="bypass:100",
-        key="lego_dna_code_input",
-        help="signal ที่บอท log ไว้มีสิทธิ์ก่อน; decoder เติมเฉพาะ signal ที่หายไป",
+        "DNA_CODE (encoded, bypass:N หรือ [1,N])", value=config.dna_code, key="lego_dna_code_input"
     ).strip()
-    reference_file = st.file_uploader(
-        "CSV reference (optional — ใช้เป็นข้อมูลของ chain ได้เมื่อติ๊กช่องด้านล่าง)",
-        type=["csv"],
-        key="lego_reference_upload",
-    )
-    use_csv_as_source = st.checkbox(
-        "ใช้ CSV ด้านบนเป็นข้อมูลของ LEGO chain (สำหรับทดสอบ/เมื่อ Firestore ว่าง)",
-        value=False,
-        key="lego_use_csv_source_input",
-        help=(
-            "ปกติ LEGO chain สร้างตารางจาก Firestore trade log เท่านั้น — การยิง Webull API "
-            "ใช้ยืนยันการเชื่อมต่อและสรุปผล ไม่ได้กลายเป็นแถวข้อมูล ติ๊กช่องนี้เพื่อเดินเชนจาก CSV "
-            "ที่อัปโหลดแทน (เช่น Firestore ยังว่าง หรืออยากทดสอบด้วยไฟล์ตัวอย่าง)"
-        ),
+
+    st.caption(
+        f"Chain config: FIX_C=${config.fix_c:,.2f} · DIFF=${config.diff:,.2f} · "
+        f"precision={config.decimal_precision} — เปลี่ยนค่าเหล่านี้ใน secrets เพื่อเริ่ม chain ใหม่"
     )
 
     settings = ConnectionSettings(
@@ -875,381 +514,268 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
         app_secret=app_secret,
         region="th",
     )
-    current_fingerprint = connection_fingerprint(
-        settings, symbol=symbol, dna_code=dna_code
-    )
-    stored_fingerprint = st.session_state.get("lego_auth_fingerprint")
-    if stored_fingerprint and stored_fingerprint != current_fingerprint:
-        clear_connection_state(clear_widgets=False)
-        st.warning("Connection input เปลี่ยน — ล้างผล Step 1–18 แล้ว")
 
-    action_left, action_right = st.columns(2)
-    with action_left:
+    left, right = st.columns(2)
+    with left:
         connect_clicked = st.button(
-            "Connect & Load",
-            type="primary",
-            use_container_width=True,
-            key="lego_connect_button",
+            "Connect & Load", type="primary", use_container_width=True, key="lego_connect_button"
         )
-    with action_right:
+    with right:
         st.button(
-            "Clear credentials + reset",
-            use_container_width=True,
-            on_click=clear_connection_state,
-            key="lego_clear_button",
+            "Clear + reset run", use_container_width=True, on_click=clear_run_state, key="lego_clear_button"
         )
 
     if connect_clicked:
         try:
-            settings.validate()
-            with st.spinner("ยิง Webull API จริงและโหลด Firestore จริง..."):
-                raw, db, live_summary = authenticate_and_load(
-                    settings,
-                    config,
-                    symbol=symbol,
-                    dna_code=dna_code,
+            with st.spinner("ยิง Webull API จริง + อ่าน chain anchor..."):
+                ctx, store, computed, summary = connect_and_prepare_run(
+                    settings, config, symbol=symbol, dna_code=dna_code
                 )
-
-            reference = None
-            if reference_file is not None:
-                reference_file.seek(0)
-                reference = prepare_raw_frame(pd.read_csv(reference_file))
-
-            effective_raw, chain_source = resolve_chain_source(
-                raw, reference, use_csv_as_source=use_csv_as_source
-            )
-
             st.session_state.lego_settings = settings
-            st.session_state.lego_db = db
+            st.session_state.lego_store = store
+            st.session_state.lego_ctx = ctx
+            st.session_state.lego_computed = computed
             st.session_state.lego_config = config
-            st.session_state.lego_raw = effective_raw
-            st.session_state.lego_reference_csv = reference
-            st.session_state.lego_use_csv_source = use_csv_as_source
-            st.session_state.lego_symbol = symbol
-            st.session_state.lego_dna_code = dna_code
-            st.session_state.lego_results = {}
-            st.session_state.lego_audit_events = []
-            st.session_state.lego_auth_fingerprint = current_fingerprint
-            st.session_state.lego_auth_summary = {
-                **live_summary,
-                "reference_csv_rows": len(reference) if reference is not None else 0,
-                "chain_source": chain_source,
-                "chain_rows": len(effective_raw),
-            }
+            st.session_state.lego_revealed = 0
+            st.session_state.lego_commit_result = None
+            st.session_state.lego_auth_summary = summary
+            st.session_state.lego_order_audit_events = []
         except Exception as exc:
-            clear_connection_state(clear_widgets=False)
+            clear_run_state()
             st.error(f"{exc.__class__.__name__}: {exc}")
 
     summary = st.session_state.get("lego_auth_summary")
     if summary is not None:
-        safe_summary = redact_payload(summary)
-        chain_rows = int(
-            safe_summary.get("chain_rows", safe_summary.get("trade_rows", 0))
+        safe = redact_payload(summary)
+        st.success(
+            "Step 0 สำเร็จ — draft row ใหม่ 1 แถวพร้อมแล้ว "
+            f"(DNA step {safe['chain']['next_dna_step']}, "
+            f"{'มี anchor' if safe['chain']['anchor_exists'] else 'chain ใหม่'})"
         )
-        chain_source = safe_summary.get("chain_source", "firestore_trade_log")
-        source_label = (
-            "CSV ที่อัปโหลด"
-            if chain_source == "uploaded_csv"
-            else f"Firestore `{config.trade_collection}`"
-        )
-        if chain_rows == 0:
-            st.error(
-                "เชื่อมต่อ Webull สำเร็จ แต่โหลดข้อมูลได้ 0 แถว — LEGO chain จะว่างทั้งหมด "
-                "(ทุก step จะ 'สำเร็จ' บนตารางว่าง และ Final DataFrame จะไม่มีข้อมูล)\n\n"
-                f"หลักการ: ตาราง LEGO chain สร้างจาก trade log ({source_label}) เท่านั้น — "
-                "การยิง Webull API (account/balance/positions/quote) ใช้ยืนยันการเชื่อมต่อและสรุปผล "
-                "ไม่ได้ถูกแปลงเป็นแถวในตาราง\n\n"
-                "วิธีแก้: (1) ให้บอทบันทึกเทรดลง collection นี้ในโปรเจกต์ Firestore เดียวกันก่อน · "
-                "(2) ตรวจว่า service account ใน secrets ชี้โปรเจกต์ที่มีข้อมูลจริง · "
-                '(3) อัปโหลด CSV แล้วติ๊ก "ใช้ CSV เป็นข้อมูลของ LEGO chain" เพื่อเดินเชนจากไฟล์'
-            )
-        else:
-            st.success(
-                f"Authenticated connection สำเร็จ — พร้อมส่ง {chain_rows} แถวจาก "
-                f"{source_label} ไป Step 1"
-            )
-        summary_cols = st.columns(4)
-        summary_cols[0].metric("Environment", safe_summary["environment"])
-        summary_cols[1].metric("Chain rows", chain_rows)
-        summary_cols[2].metric("FIX_C", f"${config.fix_c:,.2f}")
-        summary_cols[3].metric("Firestore trade rows", safe_summary["trade_rows"])
+        cols = st.columns(4)
+        cols[0].metric("Environment", safe["environment"])
+        cols[1].metric("Price Pₙ", f"${safe['snapshot']['price']:,.2f}")
+        cols[2].metric("Holdings", safe["snapshot"]["holdings"])
+        cols[3].metric("Old trade-log reads", safe["old_trade_log_reads"])
         with st.expander("All authenticated output (redacted)"):
-            st.json(safe_summary)
+            st.json(safe)
         st.download_button(
             "Download authenticated output JSON",
-            data=_download_json(safe_summary),
+            data=json.dumps(safe, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
             file_name="webull_lego_authenticated_output.json",
             mime="application/json",
         )
     elif not config.firebase_info:
         st.warning(
-            "ยังไม่มี [firebase_service_account] — หน้าแอปโหลดได้ แต่ Connect & Load "
-            "จะ fail-closed จนกว่าจะตั้ง Streamlit secrets"
+            "ยังไม่มี [firebase_service_account] — Connect & Load จะ fail-closed จนกว่าจะตั้ง secrets"
         )
 
     st.markdown("#### Learning Guide")
     st.write(
-        "Tab 0 ยิง Webull SDK จริง 3–4 read endpoints: Account list, Balance, "
-        "Positions และ Market snapshot (เมื่อมี symbol) แล้วอ่าน Firestore จริง "
-        "DNA decoder ใช้ width/value → seed → mutation ตาม Shannon Demon Learning Guide "
-        "โดยไม่เขียน credential หรือ raw account response ลง Final CSV"
+        "Tab 0 อ่าน Webull SDK จริง 4 read endpoints (Account/Balance/Positions/Quote) และอ่าน "
+        "เฉพาะ latest anchor ของ chain ผ่าน webull_lego_state/webull_lego_rows — ไม่แตะ trade log "
+        "หรือประวัติหลายแถว credential และ raw response อยู่ใน session เท่านั้น"
     )
-    source = Path(__file__).with_name("webull_lego_single_file.py").read_text(
-        encoding="utf-8"
-    )
+    _render_single_file_expander("auth")
+
+
+def _render_single_file_expander(key: str) -> None:
+    try:
+        source = Path(__file__).with_name("webull_lego_single_file.py").read_text(encoding="utf-8")
+    except OSError:
+        return
     with st.expander("Real All-in 0→18 — Single File", expanded=False):
-        st.caption(
-            "ไฟล์เดียวนี้มี Webull API reads, Firestore, DNA decode และ 17 transformations "
-            "ครบ; Production ก็อ่านจริงแต่ไม่มี place/cancel method"
-        )
+        st.caption("ไฟล์เดียวรัน Step 0→18 ด้วย engine เดียวกัน (read-only reads; ไม่มี place/cancel)")
         st.code(source, language="python")
         st.download_button(
             "Download Real All-in Single File",
             data=source,
             file_name="webull_lego_single_file.py",
             mime="text/x-python",
-            key="lego_download_all_in_auth",
+            key=f"lego_download_single_file_{key}",
         )
 
-    default_symbol, default_side, default_quantity = _order_defaults_from_row(None)
-    render_order_panel(
-        "auth",
-        config,
-        default_symbol=default_symbol,
-        default_side=default_side,
-        default_quantity=default_quantity,
-    )
+
+# --------------------------------------------------------------------------- #
+# Tabs 1–17 — reveal one column of the single new row
+# --------------------------------------------------------------------------- #
+def render_stage_tab(spec, config: LegoDashboardConfig) -> None:
+    st.subheader(f"Step {spec.number} — {spec.title}")
+    st.info(f"Quick Start: {spec.quick_start}")
+
+    computed: ComputedRow | None = st.session_state.get("lego_computed")
+    revealed = int(st.session_state.get("lego_revealed", 0))
+    ready = computed is not None and (spec.number == 1 or revealed >= spec.number - 1)
+    if computed is None:
+        st.warning("ยังรันไม่ได้ — ต้อง Connect & Load ที่ Tab 0 ก่อน")
+    elif not ready:
+        st.warning(f"ยังรันไม่ได้ — ต้อง Run Step {spec.number - 1} ก่อน")
+
+    if st.button(
+        f"Run LEGO Step {spec.number}", disabled=not ready, type="primary", key=f"lego_run_stage_{spec.number}"
+    ):
+        st.session_state.lego_revealed = max(revealed, spec.number)
+        revealed = st.session_state.lego_revealed
+
+    if computed is not None and revealed >= spec.number:
+        stage = computed.stages[spec.number - 1]
+        st.success(
+            f"Step {spec.number} สำเร็จ — คอลัมน์ '{spec.column_name}' ของ draft row ถูกคำนวณแล้ว"
+        )
+        st.markdown("#### Draft row (แถวเดียว)")
+        st.dataframe(draft_row_frame(computed, revealed), use_container_width=True)
+        with st.expander("Diagnostics + provenance", expanded=True):
+            for diagnostic in stage.diagnostics:
+                st.write(f"• {diagnostic}")
+            st.json(stage.provenance)
+            st.caption(f"upstream hash: {stage.input_hash[:16]}… · output hash: {stage.output_hash[:16]}…")
+
+    with st.expander("คู่มือเรียนรู้ LEGO Block", expanded=computed is not None and revealed >= spec.number):
+        st.write(spec.learning_guide)
+        st.caption("หลักคิดใหม่: snapshot ปัจจุบัน + anchor ล่าสุด → คำนวณ 1 ค่า → เติมลง draft row แถวเดียว")
+        st.caption(
+            "โค้ดคำนวณทั้ง 17 คอลัมน์อยู่ใน engine เดียว (lego_one_row.py) และไฟล์เดียว "
+            "webull_lego_single_file.py — ดาวน์โหลด All-in Single File ได้ที่ Tab 0 หรือ sidebar"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Tab 18 — validate + transactional append + order panel
+# --------------------------------------------------------------------------- #
+def commit_final_row_action(config: LegoDashboardConfig) -> None:
+    ctx: RunContext = st.session_state["lego_ctx"]
+    store = st.session_state["lego_store"]
+    computed: ComputedRow = st.session_state["lego_computed"]
+    try:
+        result = finalize_row(store, ctx, computed)
+        st.session_state.lego_commit_result = result
+    except StaleAnchorError as exc:
+        st.session_state.lego_commit_result = None
+        st.error(
+            f"Anchor ล้าสมัย — {exc}. มี run อื่นต่อ chain ไปแล้ว กรุณากลับไป Tab 0 กด Connect & Load "
+            "ใหม่เพื่ออ่าน anchor ล่าสุด"
+        )
+    except Exception as exc:
+        st.session_state.lego_commit_result = None
+        st.error(f"{exc.__class__.__name__}: {exc}")
 
 
 def render_final_tab(config: LegoDashboardConfig) -> None:
-    st.subheader("Step 18 — Final DataFrame")
-    results: dict[int, StageResult] = st.session_state.get("lego_results", {})
-    if 17 not in results:
-        completed = len([stage for stage in range(1, 18) if stage in results])
-        st.warning(
-            f"Final ยังล็อกอยู่ — สำเร็จ {completed}/17 steps; ต้อง Run Step 1 ถึง 17 ตามลำดับ"
-        )
-        symbol0, side0, qty0 = _order_defaults_from_row(None)
-        render_order_panel(
-            "final",
-            config,
-            default_symbol=symbol0,
-            default_side=side0,
-            default_quantity=qty0,
-        )
+    st.subheader("Step 18 — Validate + append final row (transaction)")
+    computed: ComputedRow | None = st.session_state.get("lego_computed")
+    ctx: RunContext | None = st.session_state.get("lego_ctx")
+    if computed is None or ctx is None:
+        st.warning("ยังล็อกอยู่ — ต้อง Connect & Load ที่ Tab 0 ก่อน")
         return
+    revealed = int(st.session_state.get("lego_revealed", 0))
+    if revealed < 17:
+        st.warning(f"เดิน Manual มาแล้ว {revealed}/17 steps — กด Run ให้ครบ 1→17 หรือใช้ All-in ก่อน")
 
-    final = final_dataframe(results[17])
-    what_if = what_if_dataframe(results[17], config.fix_c)
-    if final.empty:
-        st.warning(
-            "LEGO chain เดินครบ 17/17 แต่ได้ 0 แถว — Final DataFrame ว่าง\n\n"
-            "หลักการ: แหล่งข้อมูลของเชน (trade log) ไม่มีแถว ทุก step จึงทำงานบนตารางว่าง "
-            "และรายงาน success โดยไม่มีข้อมูลจริง · กลับไป Tab 0 เพื่อโหลดข้อมูลจาก Firestore "
-            'ที่มีเทรดจริง หรืออัปโหลด CSV แล้วติ๊ก "ใช้ CSV เป็นข้อมูลของ LEGO chain"'
-        )
-    else:
-        st.success("LEGO chain สำเร็จ 17/17 — Final DataFrame พร้อมใช้งาน")
-    st.caption(
-        "ตารางหลักใช้ broker-confirmed ledger: terminal fill + filled quantity + "
-        "position reconciliation + execution price จริงเท่านั้น"
-    )
-    st.dataframe(final, use_container_width=True)
-    st.download_button(
-        "Download Final DataFrame CSV",
-        data=final.to_csv(index=False).encode("utf-8-sig"),
-        file_name="webull_lego_final_dataframe.csv",
-        mime="text/csv",
+    st.markdown("#### Final row ที่จะบันทึก (แถวเดียว)")
+    st.dataframe(final_row_frame(computed), use_container_width=True)
+
+    commit_result = st.session_state.get("lego_commit_result")
+    disabled = revealed < 17 and commit_result is None
+    st.button(
+        "✅ Append final row (Step 18)",
+        type="primary",
+        disabled=disabled,
+        on_click=commit_final_row_action,
+        args=(config,),
+        key="lego_commit_button",
     )
 
-    st.markdown("### What-if learning ledger (แยกจากเงินจริง)")
-    st.warning(
-        "ชุดนี้คำนวณทุก positive quote เพื่อเทียบ CSV ตัวอย่าง ไม่ใช่ broker cash ledger"
-    )
-    st.dataframe(what_if, use_container_width=True)
-    st.download_button(
-        "Download What-if CSV",
-        data=what_if.to_csv(index=False).encode("utf-8-sig"),
-        file_name="webull_lego_what_if.csv",
-        mime="text/csv",
-    )
-
-    reference = st.session_state.get("lego_reference_csv")
-    if isinstance(reference, pd.DataFrame):
-        with st.expander("Uploaded CSV reference"):
-            clean_reference = reference.drop(
-                columns=[INTERNAL_ROW_ID], errors="ignore"
-            ).iloc[::-1].reset_index(drop=True)
-            st.dataframe(clean_reference, use_container_width=True)
-
-    audit_events = st.session_state.get("lego_audit_events", [])
-    if audit_events:
+    commit_result = st.session_state.get("lego_commit_result")
+    if commit_result is not None:
+        if commit_result.idempotent:
+            st.info(
+                f"run_id นี้ถูกบันทึกไว้แล้ว (idempotent) — ไม่สร้างเอกสารซ้ำ · version "
+                f"{commit_result.version}"
+            )
+        else:
+            st.success(
+                f"บันทึก final row สำเร็จ · version {commit_result.version} · row_id "
+                f"{commit_result.row_id[:12]}…"
+            )
+        document = build_final_document(computed, ctx)
+        final_df = final_row_frame(computed)
         st.download_button(
-            "Download sanitized UAT audit JSON",
-            data=_download_json(audit_events),
-            file_name="webull_lego_uat_audit.json",
+            "Download final row CSV",
+            data=final_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="webull_lego_final_row.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "Download final row JSON",
+            data=json.dumps(
+                redact_payload(document), ensure_ascii=False, indent=2, default=str
+            ).encode("utf-8"),
+            file_name="webull_lego_final_row.json",
             mime="application/json",
         )
+        with st.expander("Provenance + recurrence metadata (redacted)"):
+            st.json(redact_payload(document["provenance"]))
+            st.json(redact_payload(document["metadata"]))
 
-    symbol0, side0, qty0 = _order_defaults_from_row(results.get(17))
-    render_order_panel(
-        "final",
-        config,
-        default_symbol=symbol0,
-        default_side=side0,
-        default_quantity=qty0,
-    )
+    render_order_panel(config)
 
 
+# --------------------------------------------------------------------------- #
+# All-in sidebar — Step 0→18 in one click (same engine + persistence)
+# --------------------------------------------------------------------------- #
 def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
-    """Real read-only Webull/Firestore Step 0 followed by Steps 1→18."""
-
     with st.sidebar:
-        st.header("🧱 All-in Loop 0→18")
+        st.header("🧱 All-in 0→18")
         st.caption(
-            "ยิง Webull API + Firestore ใหม่จริง แล้วต่อ LEGO 17 ขั้นและ Final ในคลิกเดียว "
-            "(loop เป็น read-only) จากนั้นยิง order จริงได้ที่ order panel ด้านล่าง "
-            "ด้วย submit gate เดียวกับ Manual Run"
+            "อ่าน snapshot ใหม่ + คำนวณ 1 แถว + append transaction ในคลิกเดียว ให้ผลเหมือน Manual 0→18 "
+            "ทุกประการ จากนั้น order panel จะพร้อมที่ Tab 18"
         )
         settings: ConnectionSettings | None = st.session_state.get("lego_settings")
+        symbol_default = ""
+        ctx = st.session_state.get("lego_ctx")
+        if ctx is not None:
+            symbol_default = ctx.snapshot.symbol
+        symbol = st.text_input("Symbol", value=symbol_default, key="lego_all_in_symbol").strip().upper()
+        dna_code = st.text_input(
+            "DNA_CODE", value=st.session_state.get("lego_dna_code_input", config.dna_code), key="lego_all_in_dna"
+        ).strip()
+
         if settings is None:
-            st.warning("กรอก credential และกด Connect & Load ที่ Tab 0 ก่อน")
-        else:
-            st.info(
-                f"{settings.environment} · {settings.endpoint} · "
-                "All-in loop = read-only reads · order panel ยิงจริงอยู่ด้านล่าง"
-            )
+            st.warning("กรอก credential และกด Connect & Load ที่ Tab 0 ก่อน (All-in ใช้ credential เดียวกัน)")
 
-        status = st.session_state.get("lego_all_in_status")
-        if isinstance(status, dict):
-            if status.get("ok") and int(status.get("rows", 0)) > 0:
-                st.success(
-                    f"ครบ 0→18 · {status.get('rows', 0)} rows · "
-                    f"{status.get('elapsed_seconds', 0):.3f}s"
-                )
-            elif status.get("ok"):
-                st.warning(
-                    f"เดินครบ 0→18 แต่ได้ 0 rows · {status.get('elapsed_seconds', 0):.3f}s — "
-                    "trade log ว่าง ตารางจึงว่าง (ดูหลักการและวิธีแก้ที่ Tab 0)"
-                )
-            else:
-                st.error(
-                    f"หยุดที่ Step {status.get('step', '?')}: "
-                    f"{status.get('error_type', 'Error')}"
-                )
-
-        run_clicked = st.button(
-            "Run ALL 0 → 18 (REAL READ)",
-            type="primary",
-            use_container_width=True,
-            disabled=settings is None,
-            key="lego_all_in_button",
-        )
-        if run_clicked and settings is not None:
-            started = time.perf_counter()
-            progress = st.progress(0.0, text="Step 0 · Webull + Firestore real reads")
-            current_step = 0
+        if st.button(
+            "Run ALL 0 → 18", type="primary", use_container_width=True, disabled=settings is None, key="lego_all_in_button"
+        ):
             try:
-                dna_code = st.session_state.get("lego_dna_code", "")
-                symbol = st.session_state.get("lego_symbol", "")
-                raw, db, summary = authenticate_and_load(
-                    settings,
-                    config,
-                    symbol=symbol,
-                    dna_code=dna_code,
-                )
-                reference = st.session_state.get("lego_reference_csv")
-                use_csv_as_source = bool(
-                    st.session_state.get("lego_use_csv_source", False)
-                )
-                raw, chain_source = resolve_chain_source(
-                    raw, reference, use_csv_as_source=use_csv_as_source
-                )
-                progress.progress(1 / 19, text="Step 0 สำเร็จ · authenticated real reads")
-
-                def update_progress(step: int) -> None:
-                    nonlocal current_step
-                    current_step = step
-                    label = "Final DataFrame" if step == 18 else STAGES[step - 1].title
-                    progress.progress(
-                        (step + 1) / 19,
-                        text=f"Step {step} สำเร็จ · {label}",
+                with st.spinner("Step 0→18 (read → compute → append)..."):
+                    new_ctx, store, computed, summary = connect_and_prepare_run(
+                        settings, config, symbol=symbol or symbol_default, dna_code=dna_code
                     )
-
-                results = run_all_pipeline_stages(
-                    raw,
-                    config,
-                    dna_code=dna_code,
-                    on_step=update_progress,
-                )
-                elapsed = time.perf_counter() - started
-                st.session_state.lego_raw = raw
-                st.session_state.lego_db = db
+                    result = finalize_row(store, new_ctx, computed)
+                st.session_state.lego_store = store
+                st.session_state.lego_ctx = new_ctx
+                st.session_state.lego_computed = computed
                 st.session_state.lego_config = config
-                st.session_state.lego_results = results
-                st.session_state.lego_auth_summary = {
-                    **summary,
-                    "reference_csv_rows": (
-                        len(reference) if isinstance(reference, pd.DataFrame) else 0
-                    ),
-                    "chain_source": chain_source,
-                    "chain_rows": len(raw),
-                    "all_in_completed_steps": list(range(19)),
-                }
-                st.session_state.lego_all_in_status = {
-                    "ok": True,
-                    "step": 18,
-                    "rows": len(raw),
-                    "elapsed_seconds": elapsed,
-                }
+                st.session_state.lego_revealed = 17
+                st.session_state.lego_commit_result = result
+                st.session_state.lego_auth_summary = summary
+                st.session_state.setdefault("lego_order_audit_events", [])
+                if result.idempotent:
+                    st.info(f"idempotent — run_id เดิม ไม่สร้างซ้ำ (version {result.version})")
+                else:
+                    st.success(f"ครบ 0→18 · version {result.version}")
                 st.rerun()
+            except StaleAnchorError as exc:
+                st.error(f"Anchor ล้าสมัย — {exc} · กด Connect & Load ที่ Tab 0 ใหม่")
             except Exception as exc:
-                st.session_state.lego_results = {}
-                st.session_state.pop("lego_raw", None)
-                st.session_state.pop("lego_auth_summary", None)
-                st.session_state.lego_all_in_status = {
-                    "ok": False,
-                    "step": current_step,
-                    "error_type": exc.__class__.__name__,
-                }
                 st.error(f"{exc.__class__.__name__}: {exc}")
 
-        source = Path(__file__).with_name("webull_lego_single_file.py").read_text(
-            encoding="utf-8"
-        )
-        st.download_button(
-            "Download All-in Single File",
-            data=source,
-            file_name="webull_lego_single_file.py",
-            mime="text/x-python",
-            use_container_width=True,
-            key="lego_download_all_in_sidebar",
-        )
-        st.caption("ไฟล์เดียว · env credentials · Test/Production real reads · no mutation")
-
-        # All-in REAL order — run the chain read-only above, then fire the final
-        # decision through the SAME guarded submit gate as the per-tab Manual Run
-        # (Preview → confirmation phrase → Production safety switch → Submit).
-        st.divider()
-        st.markdown("**🔴 All-in REAL order (เหมือน Manual Run)**")
-        results = st.session_state.get("lego_results", {})
-        if settings is None:
-            st.info("ต้อง Connect & Load ที่ Tab 0 ก่อน")
-        elif 17 not in results:
-            st.caption(
-                "กด Run ALL 0 → 18 ให้ครบก่อน แล้ว order panel จะพร้อมยิงจริงที่นี่"
-            )
-        else:
-            symbol0, side0, qty0 = _order_defaults_from_row(results.get(17))
-            render_order_panel(
-                "allin",
-                config,
-                default_symbol=symbol0,
-                default_side=side0,
-                default_quantity=qty0,
-            )
+        _render_single_file_expander("sidebar")
 
 
+# --------------------------------------------------------------------------- #
+# App body
+# --------------------------------------------------------------------------- #
 if "lego_session_run_id" not in st.session_state:
     st.session_state.lego_session_run_id = uuid.uuid4().hex
 
@@ -1259,30 +785,29 @@ except Exception as config_error:
     st.error(f"Configuration error: {config_error}")
     dashboard_config = LegoDashboardConfig(firebase_info={})
 
-st.title("🧱 Webull LEGO Chain")
+st.title("🧱 Webull LEGO Chain — one new row")
 st.caption(
-    "Authenticated hybrid data → 17 manual LEGO blocks → Final DataFrame · "
-    "ทุกแท็บ 0–18 มี order panel ยิง Webull Order API จริง (Preview → Place → Query) · "
-    "การ Run/คำนวณเป็น read-only การส่ง order ต้องกด Submit เองเสมอ"
+    "หนึ่ง run = อ่าน snapshot ปัจจุบัน 1 ชุด + anchor ล่าสุด 1 แถว → คำนวณ row ใหม่ 1 แถว → "
+    "append แบบ transaction ที่ Step 18 · การคำนวณเป็น read-only การส่ง order (UAT) ต้องกด Submit เอง"
 )
 st.warning(
-    "Deploy แอปนี้เป็น Private single-user · Production ส่ง order เงินจริงได้เฉพาะเมื่อเปิด "
-    "safety switch + พิมพ์ confirmation phrase — ตรวจ account/symbol/side/quantity ทุกครั้ง"
+    "Deploy เป็น Private single-user · Production เป็น read-only เสมอ · UAT ส่ง order ได้เฉพาะ final row "
+    "ที่บันทึกแล้วและเป็น READY_BUY/READY_SELL"
 )
 
 tab_labels = [
-    "0 · Authenticated connection",
-    *[f"{stage.number} · {stage.column_name}" for stage in STAGES],
-    "18 · Final DataFrame",
+    "0 · Snapshot + anchor",
+    *[f"{spec.number} · {spec.column_name}" for spec in STAGE_SPECS],
+    "18 · Final row + append",
 ]
 tabs = st.tabs(tab_labels)
 
 with tabs[0]:
     render_auth_tab(dashboard_config)
 
-for stage, tab in zip(STAGES, tabs[1:18]):
+for spec, tab in zip(STAGE_SPECS, tabs[1:18]):
     with tab:
-        render_stage_tab(stage, dashboard_config)
+        render_stage_tab(spec, dashboard_config)
 
 with tabs[18]:
     render_final_tab(dashboard_config)

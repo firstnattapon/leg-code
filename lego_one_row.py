@@ -695,3 +695,39 @@ def _safe_dna_summary(dna_code: str) -> dict[str, Any]:
         return summary
     except Exception as exc:  # never let a summary break persistence
         return {"error": str(exc)}
+
+
+# --------------------------------------------------------------------------- #
+# 7) Stage metadata for the Manual tabs (one value per step)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class StageSpec:
+    number: int
+    column_name: str
+    title: str
+    quick_start: str
+    learning_guide: str
+    file_name: str
+
+
+STAGE_SPECS: tuple[StageSpec, ...] = (
+    StageSpec(1, FINAL_COLUMNS[0], "เวลา UTC", "อ่านเวลาที่ snapshot ถูกจับ", "เวลาของแถวใหม่คือเวลาที่อ่าน snapshot ครั้งเดียวใน run นี้ ไม่ใช่เวลาจาก log เก่า", "step_01_time_utc.py"),
+    StageSpec(2, FINAL_COLUMNS[1], "สินทรัพย์", "normalize symbol ของ snapshot", "สินทรัพย์มาจาก symbol ที่เลือกที่ Tab 0 และใช้ quote/positions ของ symbol นั้น", "step_02_asset.py"),
+    StageSpec(3, FINAL_COLUMNS[2], "สถานะ", "SNAPSHOT_READY จนกว่าจะคำนวณ decision", "draft = SNAPSHOT_READY; หลัง Step 8 กลายเป็น PASS_DNA_ZERO/PASS_THRESHOLD/READY_BUY/READY_SELL", "step_03_status.py"),
+    StageSpec(4, FINAL_COLUMNS[3], "DNA step", "DNA step = anchor ก่อนหน้า + 1 หรือ 0", "chain ใหม่เริ่มที่ 0; แถวถัดไปคือ DNA step ของ anchor ล่าสุด +1", "step_04_dna_step.py"),
+    StageSpec(5, FINAL_COLUMNS[4], "DNA signal", "decode DNA_CODE แล้วอ่าน bit ที่ DNA step", "signal เป็น deterministic จาก DNA_CODE; DNA หมดช่วงจะหยุดแบบ fail-closed", "step_05_dna_signal.py"),
+    StageSpec(6, FINAL_COLUMNS[5], "ราคา Pₙ", "อ่านราคาจาก live quote ของ snapshot", "ราคาเป็น quote ปัจจุบันเท่านั้น (>0) ไม่ดึงราคาจาก log", "step_06_price.py"),
+    StageSpec(7, FINAL_COLUMNS[6], "จำนวนถือครอง", "อ่าน holdings จาก live positions", "holdings คือ position ที่โบรกเกอร์ยืนยันของ symbol นี้ (ไม่มี = 0)", "step_07_holdings.py"),
+    StageSpec(8, FINAL_COLUMNS[7], "คำสั่ง", "สร้าง decision object ครั้งเดียว", "gap = FIX_C − holdings×price; DNA=0→PASS, |gap|≤DIFF→PASS, gap>DIFF→BUY, gap<−DIFF→SELL", "step_08_action.py"),
+    StageSpec(9, FINAL_COLUMNS[8], "ฝั่ง", "เปิดเผย side จาก decision", "PASS ไม่มีฝั่ง; BUY/SELL มาจาก decision object เดียวกัน", "step_09_side.py"),
+    StageSpec(10, FINAL_COLUMNS[9], "เหตุผล", "เปิดเผย reason จาก decision", "เหตุผลคือสถานะ decision ที่คำนวณจาก gap และ DNA", "step_10_reason.py"),
+    StageSpec(11, FINAL_COLUMNS[10], "จำนวนสั่ง", "เปิดเผย quantity จาก decision", "quantity = round(|gap|/price, decimal_precision); PASS = 0", "step_11_order_quantity.py"),
+    StageSpec(12, FINAL_COLUMNS[11], "มูลค่าพอร์ต", "value_now = holdings × price", "มูลค่าพอร์ตปัจจุบันจาก snapshot ไม่ใช่ post-fill", "step_12_portfolio_value.py"),
+    StageSpec(13, FINAL_COLUMNS[12], "ส่วนต่างเป้าหมาย", "gap = FIX_C − value_now", "ค่าบวก=ควรซื้อ ค่าลบ=ควรขาย มาจาก decision เดียวกัน", "step_13_target_gap.py"),
+    StageSpec(14, FINAL_COLUMNS[13], "Rₙ อ้างอิง", "Rₙ = FIX_C·ln(Pₙ/P₀)", "อ้างอิงจาก baseline P₀ ของ anchor; แถวแรก = 0", "step_14_reference.py"),
+    StageSpec(15, FINAL_COLUMNS[14], "ΔAₙ ต่อสเต็ป", "ΔAₙ = FIX_C·(Pₙ/Pₙ₋₁−1)", "ใช้ราคา anchor ก่อนหน้าเพียงแถวเดียว; แถวแรก = 0", "step_15_delta_actual.py"),
+    StageSpec(16, FINAL_COLUMNS[15], "Aₙ สะสม", "Aₙ = Aₙ₋₁ + ΔAₙ", "สะสมจาก Aₙ₋₁ ของ anchor ล่าสุด; แถวแรก = 0", "step_16_actual_cumulative.py"),
+    StageSpec(17, FINAL_COLUMNS[16], "Eₙ ส่วนเกินสะสม", "Eₙ = Aₙ − Rₙ", "ส่วนเกินสะสมจาก recurrence ของแถวเดียว", "step_17_excess.py"),
+)
+
+STAGE_SPEC_BY_NUMBER: dict[int, StageSpec] = {spec.number: spec for spec in STAGE_SPECS}
