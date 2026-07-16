@@ -1,0 +1,399 @@
+{
+  "framework": "5-step-process",
+  "language": "th",
+  "step_1_goals": {
+    "raw_goal": "ยกเครื่อง Step 0 ถึง Step 18 ให้หนึ่งรอบสร้าง new row ที่คำนวณตามหลักการของแต่ละแท็บ ไม่ดึงข้อมูลเก่าหลายแถวมาคัดลอก",
+    "refined_goal": "เปลี่ยน Webull LEGO Dashboard เป็น one-new-row pipeline: Step 0 อ่าน immutable Webull snapshot และ latest final anchor เพียงแถวเดียว, Steps 1–17 คำนวณ 17 คอลัมน์ใหม่, Step 18 append แบบ idempotent ด้วย Firestore transaction และจึงเปิด UAT Preview/Submit จาก immutable final row; Production เป็น read-only",
+    "target_metric": {
+      "name": "one-new-row end-to-end acceptance ratio",
+      "current": 0,
+      "target": 1,
+      "unit": "ratio",
+      "horizon": "ก่อน merge และ deploy Streamlit รุ่น one-new-row"
+    },
+    "success_criteria": [
+      "หนึ่ง successful run append final document exactly 1 document และ retry run_id เดิมไม่สร้างซ้ำ",
+      "old_trade_log_reads เท่ากับ 0 และ pipeline ใช้ current snapshot กับ latest anchor เท่านั้น",
+      "Manual และ All-in สร้าง final row เดียวกันตาม 17-column contract และ price-path recurrence",
+      "stale anchor ถูกปฏิเสธ, final export มีเฉพาะ current row, UAT submit อยู่หลัง Step 18 และ Production read-only"
+    ]
+  },
+  "step_2_problems": [
+    {
+      "id": "P1",
+      "description": "pipeline เดิมรักษา len(raw history) และเติมคอลัมน์ย้อนหลังแทนการสร้าง row ใหม่",
+      "gap_value": 30,
+      "severity": 5
+    },
+    {
+      "id": "P2",
+      "description": "Step 1–13 อ่านหรือ normalize field ที่ trade log เก่าบันทึกไว้แทนการคำนวณ current snapshot",
+      "gap_value": 25,
+      "severity": 5
+    },
+    {
+      "id": "P3",
+      "description": "Step 14–17 สแกน execution history ทั้งช่วงแทน latest-anchor price-path recurrence",
+      "gap_value": 20,
+      "severity": 5
+    },
+    {
+      "id": "P4",
+      "description": "ไม่มี deterministic run_id, transactional latest pointer และ stale-anchor guard",
+      "gap_value": 15,
+      "severity": 5
+    },
+    {
+      "id": "P5",
+      "description": "UI, standalone runner, tests และ order panels ผูกกับ multi-row และ pre-final order workflow",
+      "gap_value": 10,
+      "severity": 4
+    }
+  ],
+  "step_3_diagnosis": [
+    {
+      "problem_id": "P1",
+      "root_causes": [
+        {
+          "id": "RC1",
+          "cause": "StageFunction คืน Series ยาวเท่ากับ raw และ final_dataframe คืนทุก history row",
+          "why_chain": [
+            "Step 0 โหลด trade collection",
+            "raw history เป็นหน่วยหลัก",
+            "ทุก stage คง index เดิม",
+            "final จึงเป็นประวัติที่เติมคอลัมน์"
+          ],
+          "impact_weight": 0.65,
+          "evidence": "run_stage เดิมตรวจ len(previous.frame) == len(raw)"
+        },
+        {
+          "id": "RC2",
+          "cause": "Webull live reads อยู่ใน summary แต่ไม่ได้เป็น source row",
+          "why_chain": [
+            "positions และ quote แยกจาก raw",
+            "trade documents กลายเป็น input จริง",
+            "empty trade collection ทำให้ final ว่าง"
+          ],
+          "impact_weight": 0.35,
+          "evidence": "load_live_inputs เดิมคืน Firestore trade DataFrame"
+        }
+      ]
+    },
+    {
+      "problem_id": "P2",
+      "root_causes": [
+        {
+          "id": "RC3",
+          "cause": "blocks เลือก aliases จาก logged fields",
+          "why_chain": [
+            "DNA/action/quantity มีค่าเก่าให้เลือก",
+            "จึงไม่ต้องสร้าง decision ใหม่",
+            "ผลไม่สะท้อน current snapshot"
+          ],
+          "impact_weight": 0.6,
+          "evidence": "step_01 ถึง step_11 เดิมใช้ raw coalescing"
+        },
+        {
+          "id": "RC4",
+          "cause": "ไม่มี decision contract กลางจาก DNA, holdings, price, FIX_C และ DIFF",
+          "why_chain": [
+            "action อยู่ก่อน value/gap tabs",
+            "implementation เดิมคัดลอกจาก log",
+            "ต้องคำนวณ decision เดียวแล้วเปิดเผย field ตาม tabs"
+          ],
+          "impact_weight": 0.4,
+          "evidence": "Logical FIX_C formula มีอยู่แต่ไม่ได้เป็น per-run source"
+        }
+      ]
+    },
+    {
+      "problem_id": "P3",
+      "root_causes": [
+        {
+          "id": "RC5",
+          "cause": "ledger เดิมต้อง deduplicate fills และสแกนทุก execution row",
+          "why_chain": [
+            "ต้องหา execution P0",
+            "ต้องสะสมทุก event",
+            "latest row แถวเดียวไม่พอสำหรับ semantics เดิม"
+          ],
+          "impact_weight": 0.55,
+          "evidence": "realized ledger รับ raw history ทั้ง DataFrame"
+        },
+        {
+          "id": "RC6",
+          "cause": "ไม่มี persisted P0, previous price, previous A และ chain namespace",
+          "why_chain": [
+            "17 columns ไม่มี metadata",
+            "Step 0 ระบุ anchor ปลอดภัยไม่ได้",
+            "config ต่างกันอาจปน chain"
+          ],
+          "impact_weight": 0.45,
+          "evidence": "ไม่มี webull_lego_state/latest-row pointer"
+        }
+      ]
+    },
+    {
+      "problem_id": "P4",
+      "root_causes": [
+        {
+          "id": "RC7",
+          "cause": "ไม่มี atomic compare-and-set ของ anchor version",
+          "why_chain": [
+            "หลาย session อ่าน anchor เดียวกัน",
+            "ทั้งคู่คำนวณ DNA step เดียวกัน",
+            "append ตรงทำให้ recurrence แตก"
+          ],
+          "impact_weight": 0.6,
+          "evidence": "Step 18 เดิมเป็น read/export operation"
+        },
+        {
+          "id": "RC8",
+          "cause": "auto document id ไม่ป้องกัน retry ซ้ำ",
+          "why_chain": [
+            "Streamlit rerun หลัง timeout ได้",
+            "ผู้ใช้กดซ้ำได้",
+            "ต้องใช้ deterministic run_id เป็น document id"
+          ],
+          "impact_weight": 0.4,
+          "evidence": "ไม่มี persisted run identity"
+        }
+      ]
+    },
+    {
+      "problem_id": "P5",
+      "root_causes": [
+        {
+          "id": "RC9",
+          "cause": "UI/CLI/tests ยืนยัน multi-row cardinality",
+          "why_chain": [
+            "metrics แสดง len(history)",
+            "CLI บังคับ raw/previous row count เท่ากัน",
+            "tests คาด final length เท่ากับ raw"
+          ],
+          "impact_weight": 0.65,
+          "evidence": "existing AppTest และ pipeline tests"
+        },
+        {
+          "id": "RC10",
+          "cause": "order panel ปรากฏก่อน finalization และหลายตำแหน่ง",
+          "why_chain": [
+            "payload ยังไม่ผูก immutable final row",
+            "order lifecycle ปน calculation flow",
+            "Production mutation surface กว้างเกินจำเป็น"
+          ],
+          "impact_weight": 0.35,
+          "evidence": "order panel เดิมอยู่ทุก tab"
+        }
+      ]
+    }
+  ],
+  "step_4_design": [
+    {
+      "id": "S1",
+      "targets_root_cause": "RC1,RC2",
+      "intervention": "สร้าง immutable Step-0 snapshot, RunContext และ one-row StageResult; ห้ามอ่าน shannon_demon_trades",
+      "expected_effect": 30,
+      "cost": 8,
+      "priority_score": 3.75,
+      "rank": 1
+    },
+    {
+      "id": "S2",
+      "targets_root_cause": "RC3,RC4",
+      "intervention": "คำนวณ Steps 1–13 ใหม่จาก snapshot, DNA และ Logical FIX_C decision contract",
+      "expected_effect": 25,
+      "cost": 8,
+      "priority_score": 3.125,
+      "rank": 2
+    },
+    {
+      "id": "S3",
+      "targets_root_cause": "RC5,RC6",
+      "intervention": "ใช้ latest-anchor recurrence: Rn, deltaAn, An และ En พร้อม persisted full-precision metadata",
+      "expected_effect": 20,
+      "cost": 7,
+      "priority_score": 2.857,
+      "rank": 3
+    },
+    {
+      "id": "S4",
+      "targets_root_cause": "RC7,RC8",
+      "intervention": "Step 18 ทำ transaction บน webull_lego_rows/webull_lego_state ด้วย deterministic run_id และ stale-anchor guard",
+      "expected_effect": 15,
+      "cost": 6,
+      "priority_score": 2.5,
+      "rank": 4
+    },
+    {
+      "id": "S5",
+      "targets_root_cause": "RC9,RC10",
+      "intervention": "ย้าย UI, single-file, docs และ tests ไป one-row contract; แสดง UAT Preview/Submit หลัง persisted final เท่านั้น",
+      "expected_effect": 10,
+      "cost": 5,
+      "priority_score": 2,
+      "rank": 5
+    }
+  ],
+  "step_5_do_it": {
+    "action_plan": [
+      {
+        "action": "สร้าง branch codex/one-new-row-pipeline จาก firstnattapon/leg-code main",
+        "owner": "implementation agent",
+        "start": "Phase 1",
+        "end": "Phase 1",
+        "depends_on": []
+      },
+      {
+        "action": "สร้าง one-row pipeline types, snapshot adapter และ latest-anchor loader",
+        "owner": "implementation agent",
+        "start": "Phase 1",
+        "end": "Phase 2",
+        "depends_on": [
+          "target repository verified"
+        ]
+      },
+      {
+        "action": "ยกเครื่อง Steps 1–13 และ 17 standalone blocks ให้คำนวณ current row",
+        "owner": "implementation agent",
+        "start": "Phase 2",
+        "end": "Phase 3",
+        "depends_on": [
+          "one-row contracts"
+        ]
+      },
+      {
+        "action": "สร้าง price-path recurrence และ persisted full-precision anchor metadata",
+        "owner": "implementation agent",
+        "start": "Phase 3",
+        "end": "Phase 3",
+        "depends_on": [
+          "Steps 1–13"
+        ]
+      },
+      {
+        "action": "สร้าง Step 18 Firestore transaction, idempotency และ stale-anchor handling",
+        "owner": "implementation agent",
+        "start": "Phase 3",
+        "end": "Phase 4",
+        "depends_on": [
+          "recurrence contract"
+        ]
+      },
+      {
+        "action": "ย้าย UAT Preview/Submit ไปหลัง persisted Step 18 และปิด Production mutation",
+        "owner": "implementation agent",
+        "start": "Phase 4",
+        "end": "Phase 4",
+        "depends_on": [
+          "Step 18 transaction"
+        ]
+      },
+      {
+        "action": "ปรับ Manual/All-in/single-file/docs/tests และรัน regression suite",
+        "owner": "implementation agent",
+        "start": "Phase 4",
+        "end": "Phase 5",
+        "depends_on": [
+          "one-row UI and persistence"
+        ]
+      }
+    ],
+    "measurement": {
+      "kpis": [
+        {
+          "name": "One-row append cardinality",
+          "formula": "appended_final_documents / successful_runs",
+          "target": 1,
+          "frequency": "ทุก integration test"
+        },
+        {
+          "name": "Legacy trade-log isolation",
+          "formula": "old_trade_log_reads",
+          "target": 0,
+          "frequency": "ทุก test run"
+        },
+        {
+          "name": "Idempotency violations",
+          "formula": "duplicate_documents_per_run_id",
+          "target": 0,
+          "frequency": "ทุก transaction test"
+        },
+        {
+          "name": "Acceptance pass rate",
+          "formula": "passed_new_row_acceptance_tests / total_new_row_acceptance_tests",
+          "target": 1,
+          "frequency": "ทุก commit"
+        }
+      ],
+      "evaluation_equations": [
+        {
+          "name": "Goal attainment",
+          "formula": "A = G_n / G_target",
+          "interpret": "A >= 1 เมื่อ acceptance target ผ่านครบ"
+        },
+        {
+          "name": "Progress ratio",
+          "formula": "P = (G_n-G_0)/(G_target-G_0)",
+          "interpret": "สัดส่วนการปิดช่องว่างจาก baseline"
+        },
+        {
+          "name": "Row invariant",
+          "formula": "N_after-N_before = 1",
+          "interpret": "successful new run เพิ่มหนึ่ง row; retry run_id เดิมเพิ่มศูนย์"
+        },
+        {
+          "name": "First row",
+          "formula": "P0=Pn; DNA_step=0; R0=deltaA0=A0=E0=0",
+          "interpret": "chain ใหม่ไม่ต้องอ่าน history"
+        },
+        {
+          "name": "Recurrence",
+          "formula": "Rn=FIX_C*ln(Pn/P0); deltaAn=FIX_C*(Pn/Pn-1-1); An=An-1+deltaAn; En=An-Rn",
+          "interpret": "ใช้ current snapshot และ latest anchor"
+        }
+      ],
+      "loop": {
+        "control_equation": "e_n = G_target - G_n",
+        "convergence_rate": "r_n = |e_n| / |e_{n-1}|",
+        "stop_condition": "|e_n| <= epsilon",
+        "epsilon": 0,
+        "gain_K": 0.5,
+        "correction": "u_{n+1} = K * e_n",
+        "n_max": 5,
+        "escalation_ladder": [
+          {
+            "if": "r_n < 1 (shrinking, not yet at epsilon)",
+            "loop_back_to": "step_5",
+            "action": "แก้ failing acceptance cases ที่เหลือ"
+          },
+          {
+            "if": "r_n ~ 1 (stalled)",
+            "loop_back_to": "step_3",
+            "action": "ทบทวน snapshot, dependency, anchor และ transaction root causes"
+          },
+          {
+            "if": "r_n > 1 (diverging)",
+            "loop_back_to": "step_2",
+            "action": "จัด problem boundary ใหม่"
+          },
+          {
+            "if": "still far after n cycles",
+            "loop_back_to": "step_1",
+            "action": "แบ่ง rollout โดยไม่ลด correctness หรือ safety target"
+          }
+        ]
+      }
+    }
+  },
+  "assumptions": [
+    "P0 มาจากราคาแถวแรก",
+    "Tab 0 รับ FIX_C และ DIFF; quantity precision เริ่ม 5",
+    "หนึ่ง run มี draft row หนึ่งแถวและ persist ครั้งเดียวที่ Step 18",
+    "final view/export แสดงเฉพาะ current row",
+    "webull_lego_rows เก็บ final rows, webull_lego_state เก็บ pointer/version และ webull_lego_order_audit เก็บ order audit",
+    "UAT Submit ต้อง Preview และพิมพ์ confirmation phrase; Production read-only",
+    "credentials และ raw sensitive responses ไม่ถูก persist",
+    "expected_effect ใช้ percentage points และ cost ใช้ person-days"
+  ]
+}

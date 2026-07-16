@@ -1,130 +1,117 @@
 # Webull Dashboard
 
-Streamlit dashboard สำหรับดู Shannon Demon state/trades และหน้า **Manual Test
-Lab** สำหรับทดสอบ Webull, DNA, Logical FIX_C และ benchmark แบบเจาะจง
+โปรเจกต์มี Dashboard เดิม, Manual Test Lab และแอป `lego_dashboard.py` สำหรับเรียนรู้
+Shannon Demon แบบ 19 แท็บ
 
-Manual Test Lab รองรับ connection/quote, account list, balance, positions,
-order preview/place, open orders, history, detail, cancel, DNA encode/decode,
-Logical FIX_C, local benchmark และแท็บ Web Apps ที่รวมคู่มือ Rebalancing 101
-กับ Rebalancing Playground แบบโต้ตอบไว้ในหน้าเดียว รวมถึงแท็บ **Cheat Sheet**
-สำหรับทดลองสูตร BUY/SELL/PASS และ price-path Aₙ/Rₙ/Eₙ แบบรวดเร็ว
+## One-New-Row LEGO Chain
 
-Cheat Sheet เป็น educational/what-if calculator ที่ทำงานจากไฟล์ local และไม่เรียก
-Webull API ตัวเลข Aₙ/Rₙ/Eₙ ในหน้านี้จึงไม่ใช่ realized broker ledger; การสรุป
-เงินจริงต้องใช้ quantity, execution price และ position reconciliation จาก fill จริง
+LEGO Chain รุ่นนี้ไม่โหลด `shannon_demon_trades` หลายแถวมาต่อคอลัมน์อีกแล้ว:
 
-## Run locally
-
-```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m streamlit run streamlit_dashboard.py
+```text
+Step 0  Webull Account/Balance/Positions/Quote snapshot + latest final anchor
+Step 1–17  คำนวณ draft row เดียวทีละคอลัมน์
+Step 18  validate 17 columns + append Firestore transaction
+หลัง Step 18  UAT Preview/Submit จาก immutable final row
 ```
 
-## Webull LEGO Chain — แอปใหม่ 19 แท็บ
+- หนึ่ง successful run เพิ่ม `webull_lego_rows` exactly 1 document
+- Step 0 อ่านเฉพาะ `webull_lego_state/{chain_key}` และ latest row ที่ pointer ชี้
+- `run_id` เป็น deterministic document id; retry จึงไม่สร้าง row ซ้ำ
+- stale anchor ถูกปฏิเสธและต้องเริ่ม Step 0 ใหม่
+- Manual และ All-in ใช้ calculation/persistence contract เดียวกัน
+- Production อ่าน snapshot และคำนวณได้ แต่เป็น read-only เสมอ
 
-`lego_dashboard.py` เป็น entry point แยกจาก Dashboard และ Manual เดิม ผู้ใช้ต้อง
-ยืนยัน Webull + Firestore ที่ Tab 0 แล้วกด Run เองทีละ Step 1–17 ก่อนเปิด Final
-DataFrame ที่ Tab 18
+## Run
 
-- [LEARNING_GUIDE.md](LEARNING_GUIDE.md) อธิบาย DNA seed+mutation, API จริง และ ledger
-- Sidebar `Run ALL 0 → 18 (REAL READ)` ยิง Account/Balance/Positions/Quote + Firestore
-  ใหม่จริง แล้วต่อครบทุกขั้นในคลิกเดียว (loop เป็น read-only)
-- หลัง All-in สำเร็จ Sidebar จะมี **All-in REAL order** panel ที่ยิง Webull Order API จริง
-  จาก final decision ของ chain โดยใช้ submit gate เดียวกับ Manual Run: ต้อง Preview →
-  พิมพ์ confirmation phrase → (Production) เปิด safety switch → กด Submit เอง
-- [webull_lego_single_file.py](webull_lego_single_file.py) เป็นไฟล์เดียวที่รัน 0→18
-  ได้โดยไม่ import โมดูลในโปรเจกต์ และรองรับ Test/Production read-only
-
-```bash
-.venv/Scripts/python -m streamlit run lego_dashboard.py
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m streamlit run lego_dashboard.py
 ```
 
-ลำดับของแต่ละแท็บเหมือน LEGO block: Goal → Quick Start → แสดง **Single-File
-Python source** → Run → validate → แสดง accumulated DataFrame → ส่งต่อขั้นถัดไป
-→ อ่าน Learning Guide โดยไม่มี `exec` หรือโค้ดที่สร้างจากข้อความผู้ใช้
+1. Tab 0: เลือก environment แล้วกรอก credentials, Symbol, DNA_CODE, FIX_C และ DIFF
+2. กด `Connect & Create New Draft Row`
+3. รัน Step 1–17 ทีละแท็บ หรือใช้ `Run ALL 0 → 18 (NEW ROW)`
+4. Manual flow: กด `Finalize Step 18 + Append New Row`
+5. เฉพาะ `READY_BUY/READY_SELL` ใน Test (UAT): Preview, พิมพ์ confirmation phrase และ Submit
 
-Block 1–17 อยู่ใน `lego_blocks/step_*.py` แต่ละไฟล์จบในตัวเองและไม่ import โมดูล
-ภายในโปรเจกต์ ผู้ใช้กด **Download Single-File LEGO Block** แล้วรัน CLI ตามคำสั่ง
-Quick Start ที่อยู่ใน docstring บนสุดได้ทันที ฟังก์ชัน `transform` ในไฟล์ที่แสดงคือ
-callable เดียวกับที่ปุ่ม Run ของ Streamlit เรียก จึงไม่มีโค้ดตัวอย่างคนละชุดกับโค้ดจริง
+ไฟล์ [webull_lego_single_file.py](webull_lego_single_file.py) รัน contract เดียวกันโดย
+ไม่ import โมดูลในโปรเจกต์และไม่มี order mutation:
 
-Final DataFrame มี 17 คอลัมน์ตาม contract และแยกข้อมูลเงินสองชนิดออกจากกัน:
+```powershell
+$env:WEBULL_ACCOUNT_ID="..."
+$env:WEBULL_APP_KEY="..."
+$env:WEBULL_APP_SECRET="..."
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\safe\firebase.json"
+python webull_lego_single_file.py --environment "Test (UAT)" --symbol AAPL --dna-code "bypass:100"
+```
 
-- `Rₙ`, `ΔAₙ`, `Aₙ`, `Eₙ` ในตารางหลักเป็น broker-confirmed execution ledger
-- What-if table คำนวณทุก positive quote เพื่อการเรียนรู้/เทียบ CSV เท่านั้น
+เพิ่ม `--persist` เมื่อต้องการ append final row ด้วย transaction
 
-### Streamlit secrets
+## Calculation Contract
 
-คัดลอก schema จาก `.streamlit/secrets.example.toml` ไปใส่ใน App settings > Secrets
-และแทน placeholder ด้วย Firebase service account จริง ห้าม commit `secrets.toml`,
-Webull Account ID, App Key หรือ App Secret
+แถวแรก:
 
-Webull credentials ถูกกรอกในหน้าแอปและอยู่เฉพาะ Streamlit session ส่วนค่าคงที่ใช้:
+```text
+DNA step = 0
+P₀ = Pₙ
+R₀ = ΔA₀ = A₀ = E₀ = 0
+```
+
+แถวถัดไปใช้ latest final anchor:
+
+```text
+Rₙ  = FIX_C × ln(Pₙ/P₀)
+ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)
+Aₙ  = Aₙ₋₁ + ΔAₙ
+Eₙ  = Aₙ − Rₙ
+```
+
+Decision:
+
+```text
+gap = FIX_C − holdings × price
+DNA signal = 0       → PASS_DNA_ZERO
+|gap| ≤ DIFF         → PASS_THRESHOLD
+gap > DIFF           → READY_BUY
+gap < −DIFF          → READY_SELL
+quantity = round(|gap| / price, decimal_precision)
+```
+
+ค่าคำนวณใช้ full precision; final presentation/export round money columns เป็น 2 ตำแหน่ง
+
+## Firestore
 
 ```toml
 [lego_dashboard]
-trade_collection = "shannon_demon_trades"
-audit_collection = "webull_lego_uat_audit"
-trade_limit = 100
+rows_collection = "webull_lego_rows"
+state_collection = "webull_lego_state"
+order_audit_collection = "webull_lego_order_audit"
 fix_c = 1500.0
-audit_to_firestore = false   # ค่าเริ่มต้น: Firestore อ่านอย่างเดียว (เหมือน dashboard/Manual เดิม)
+diff = 30.0
+decimal_precision = 5
+audit_to_firestore = true
 ```
 
-Firestore เป็น **read-only ตามค่าเริ่มต้น** เหมือนหน้า Dashboard/Manual เดิม (มีแต่ `.get()`
-อ่าน trade log ไม่เคยเขียน). audit ของ order จะเก็บใน session และดาวน์โหลดได้ที่ Tab 18.
-service account แบบอ่านอย่างเดียว (เช่น `*-reader`) จึงใช้ได้ทันทีโดยไม่เจอ 403.
-ตั้ง `audit_to_firestore = true` **เฉพาะเมื่อ** service account มีสิทธิ์เขียน collection
-`webull_lego_uat_audit` จริง (มิฉะนั้นทุก order action จะ 403 PermissionDenied)
-
-### Deploy บน Streamlit Community Cloud
-
-1. สร้างแอปจาก repository นี้และตั้ง Main file path เป็น `lego_dashboard.py`
-2. จำกัด viewer เป็น **Private single-user** ก่อนเพิ่ม secrets
-3. วาง Firebase secrets ตามไฟล์ตัวอย่าง และให้ service account มีสิทธิ์อ่าน trade
-   collection/เขียน audit collection เท่าที่จำเป็น
-4. เปิดแอปและยืนยันว่า Environment เริ่มต้นเป็น `Test (UAT)`
-5. ทดสอบ Connect & Load, Run 1–17, order panel (Preview → Place → Query) และ download Final/What-if
-6. UAT ยิง UAT endpoint จริง; Production ส่ง order เงินจริงได้เฉพาะเมื่อเปิด safety switch
-   และพิมพ์ confirmation phrase ที่ทวน account/symbol/side/quantity ให้ตรง
-
-ทุกแท็บ 0–18 มี order panel เดียวกันและแยกจากปุ่ม Run เสมอ: ต้อง Preview payload เดิม
-ก่อน Submit, พิมพ์ confirmation phrase ให้ตรง และ (Production) เปิด safety switch ก่อนยิง
-`place_order` จริง จากนั้นใช้ Query อ่านสถานะจริง สถานะ `SUBMITTED`/`PENDING` จะไม่ถูกนับเป็น
-`FILLED` และผลที่เขียนลง `webull_lego_uat_audit` ถูก redact ไม่มี credentials/raw account response
-
-แผน machine-readable และคู่มือ offline อยู่ที่ `webull_lego_chain_plan.json` กับ
-`webull_lego_chain_guide.html`
-
-หน้า Manual ใช้งานได้โดยไม่ต้องตั้งค่า Firestore ส่วนหน้า Dashboard ต้องมี
-`.streamlit/secrets.toml` ที่ประกอบด้วย `firebase_service_account`
-
-## Realized cash-flow contract
-
-ตาราง trade log แยกข้อมูลสองชนิดออกจากกัน:
-
-- กราฟ Learning Guide เป็น **what-if price path** จาก market quote
-- คอลัมน์ `ΔAₙ`, `Aₙ` และ `Eₙ` เป็น **realized execution ledger** และรับข้อมูล
-  เฉพาะ terminal fill ที่มี `filled_quantity > 0`, `position_reconciled = true`,
-  side เป็น BUY/SELL และมี execution/average fill price จริง
-
-`PASS`, pending, rejected, unfilled และ `ORDER_*_POSITION_PENDING` ไม่ทำให้ยอด
-realized เปลี่ยน และ dashboard จะไม่ใช้ `last_price` แทน execution price หาก
-trade document ยังไม่มีราคาที่ execute คอลัมน์ realized จะเว้นว่างพร้อมคำเตือน
-เพื่อไม่สร้างตัวเลขเงินจริงที่พิสูจน์ไม่ได้ ค่า `Aₙ` จะหัก fee เมื่อ log มี field
-ค่าธรรมเนียมที่รองรับ มิฉะนั้นจะแสดง gross cash พร้อม contract นี้อย่างชัดเจน
+Service account ต้องอ่าน/เขียน rows และ state collections เพื่อใช้ Step 18 transaction
+ส่วน credentials และ raw sensitive responses อยู่ใน session เท่านั้น
 
 ## Security
 
-- ค่าเริ่มต้นของ Manual และ LEGO Chain คือ **Test (UAT)**
-- Account ID, App Key และ App Secret ต้องกรอกขณะใช้งานและไม่ถูกเขียนลงไฟล์
-- ห้าม commit `.streamlit/secrets.toml`, `.env` หรือ credentials ใด ๆ
-- ทุกแท็บ 0–18 มี order panel จริง แต่การส่งคำสั่งต้องกด Submit เองหลัง Preview เสมอ
-- Production order ต้องเปิด safety switch และพิมพ์ confirmation phrase (ทวน account/symbol/side/quantity) ให้ตรง
-- Credential ที่เคยส่งผ่านแชตหรือช่องทางสาธารณะควรถูก revoke/rotate
+- Default environment คือ Test (UAT)
+- Production ไม่มี Preview/Submit path
+- order panel ปรากฏหลัง Step 18 persisted เท่านั้น
+- PASS และ unpersisted draft ส่ง order ไม่ได้
+- UAT ต้อง Preview payload เดิมและพิมพ์ confirmation phrase ให้ตรง
+- ห้าม commit `.streamlit/secrets.toml`, `.env` หรือ credentials
+
+## Planning Artifacts
+
+- `webull_dashboard_overhaul_five_step_prompt.json` — implementation prompt หลัก
+- `webull_lego_chain_plan.json` — machine-readable summary
+- `webull_lego_chain_guide.html` — offline overview
 
 ## Test
 
-```bash
-.venv/Scripts/python -m pytest -q
+```powershell
+python -m pytest -q
 ```

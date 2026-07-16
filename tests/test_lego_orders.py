@@ -77,14 +77,15 @@ def test_submit_gate_is_fail_closed_and_reports_every_missing_safeguard():
     )
     assert uat_ready.allowed
 
-    prod_ready = evaluate_submit_gate(
+    prod_still_read_only = evaluate_submit_gate(
         environment=PRODUCTION_ENVIRONMENT,
         payload_valid=True,
         preview_matches=True,
         confirmation_ok=True,
         safety_switch=True,
     )
-    assert prod_ready.allowed
+    assert not prod_still_read_only.allowed
+    assert "read-only" in prod_still_read_only.reasons[0]
 
 
 def test_summarize_extracts_ids_and_never_marks_pending_realized():
