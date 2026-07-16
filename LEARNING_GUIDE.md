@@ -135,8 +135,11 @@ Eₙ  = Aₙ − Rₙ
 ## เหตุผลที่ All-in ไม่ส่ง order
 
 read-only loop ทำซ้ำได้โดยไม่สร้าง side effect จึงเหมาะกับ Test และ Production
-การ Preview/Submit/Cancel อยู่ใน UAT panel แยกหลัง Step 11, ใช้ confirmation phrase
-และถูกปิดแบบ fail-closed ใน Production การวิเคราะห์ข้อมูลไม่ควรแอบเปลี่ยนบัญชี
+การส่ง order จริงจะแยกออกมาที่ **order panel** ซึ่งอยู่ในทุกแท็บ 0–18 และแยกจากปุ่ม Run
+เสมอ ต้อง Preview payload เดิมก่อน, พิมพ์ confirmation phrase ให้ตรง และ (Production)
+เปิด safety switch + ทวน account/symbol/side/quantity ก่อนยิง `place_order` จริง จากนั้น
+ใช้ Query อ่านสถานะ · `SUBMITTED`/`PENDING` ไม่ถูกนับเป็น `FILLED` · การวิเคราะห์ข้อมูล
+(All-in/Run) จะไม่แอบเปลี่ยนบัญชี
 
 ## จำง่ายสำหรับมือใหม่
 
@@ -145,5 +148,6 @@ read-only loop ทำซ้ำได้โดยไม่สร้าง side ef
 - Step 14–17 = เชื่อเฉพาะ fill ที่พิสูจน์ได้
 - Step 18 = export
 - Manual Run = เรียนทีละ LEGO
-- All-in = ยิง API ใหม่และต่อครบทุก LEGO
-- Production = อ่านได้จริง แต่ mutation ถูกปิด
+- All-in = ยิง API ใหม่และต่อครบทุก LEGO (read-only) + มี order panel ยิงจริงในตัว เหมือน Manual Run
+- Order panel = มีทุกแท็บและใน All-in ส่ง order จริงเมื่อกด Submit เอง
+- Production = ส่ง order เงินจริงได้เฉพาะเมื่อเปิด safety switch + confirmation phrase

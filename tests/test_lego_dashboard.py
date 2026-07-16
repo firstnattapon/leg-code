@@ -100,14 +100,182 @@ def test_credential_widgets_cannot_gain_hard_coded_defaults():
         assert re.search(r'\bvalue\s*=\s*""', widget.group("body"))
 
 
-def test_production_mutations_are_guarded_in_source():
+def test_order_actions_are_guarded_in_source():
     source = Path("lego_dashboard.py").read_text(encoding="utf-8")
 
-    assert 'settings.environment == "Test (UAT)"' in source
-    assert "Production เป็น read-only" in source
+    # The submit path is fail-closed through the shared gate + confirmation phrase.
+    assert "evaluate_submit_gate" in source
+    assert "order_confirmation_phrase" in source
+    assert "Production safety switch" in source
+    # Full Preview -> Place -> Query -> Cancel lifecycle is audited.
     assert 'action="PREVIEW"' in source
     assert 'action="SUBMIT"' in source
+    assert 'action="QUERY"' in source
     assert 'action="CANCEL"' in source
+    # No hard-coded real credentials may ever return to the source.
+    assert "1251161573554425856" not in source
+
+
+def _authenticated_app(environment: str = "Test (UAT)"):
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_settings"] = ConnectionSettings(
+        environment, "acct-123", "key", "secret"
+    )
+    app.session_state["lego_symbol"] = "AAPL"
+    app.session_state["lego_results"] = {}
+    return app
+
+
+class _FakeClient:
+    """Stand-in Webull client that acknowledges but never auto-fills an order."""
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    def preview_market_order(self, payload):
+        return {"data": {"status": "OK"}}
+
+    def place_market_order(self, payload):
+        return {"data": {"orderId": "OID-1", "orderStatus": "PENDING"}}
+
+    def get_order_detail(self, client_order_id):
+        return {"data": {"orderId": "OID-1", "orderStatus": "FILLED"}}
+
+
+def test_order_panel_is_locked_before_authentication():
+    app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
+
+    assert not app.exception
+    assert not [button for button in app.button if button.label == "Preview order"]
+
+
+def test_every_tab_0_to_18_exposes_a_real_order_panel_after_auth():
+    app = _authenticated_app().run(timeout=30)
+
+    assert not app.exception
+    previews = [b for b in app.button if b.label == "Preview order"]
+    submits = [b for b in app.button if b.label.startswith("🚀 Submit order")]
+    queries = [b for b in app.button if b.label == "Query order status"]
+    assert len(previews) == 19
+    assert len(submits) == 19
+    assert len(queries) == 19
+    # Nothing is submittable until the user previews and confirms.
+    assert all(button.disabled for button in submits)
+
+
+def test_uat_submit_unlocks_only_after_preview_and_confirmation(monkeypatch):
+    import lego_orders
+    import manual_tools
+
+    monkeypatch.setattr(manual_tools, "WebullManualClient", _FakeClient)
+
+    app = _authenticated_app("Test (UAT)").run(timeout=30)
+    assert next(b for b in app.button if b.key == "order_auth_submit").disabled
+
+    next(b for b in app.button if b.key == "order_auth_preview").click().run(timeout=30)
+    # Preview alone is not enough — the confirmation phrase is still required.
+    assert next(b for b in app.button if b.key == "order_auth_submit").disabled
+
+    phrase = lego_orders.order_confirmation_phrase(
+        "Test (UAT)", "acct-123", "BUY", "AAPL", 1.0
+    )
+    next(t for t in app.text_input if t.key == "order_auth_confirm").set_value(
+        phrase
+    ).run(timeout=30)
+    assert not next(b for b in app.button if b.key == "order_auth_submit").disabled
+
+    next(b for b in app.button if b.key == "order_auth_submit").click().run(timeout=30)
+    output = app.session_state["order_auth_output"]
+    assert output["action"] == "SUBMIT"
+    assert output["result"]["summary"]["order_id"] == "OID-1"
+    # A PENDING acknowledgement is never reported or counted as a fill.
+    assert output["result"]["summary"]["is_filled"] is False
+    assert output["result"]["summary"]["realized_eligible"] is False
+
+
+def test_production_submit_requires_the_safety_switch(monkeypatch):
+    import lego_orders
+    import manual_tools
+
+    monkeypatch.setattr(manual_tools, "WebullManualClient", _FakeClient)
+
+    app = _authenticated_app("Production").run(timeout=30)
+    next(b for b in app.button if b.key == "order_auth_preview").click().run(timeout=30)
+    phrase = lego_orders.order_confirmation_phrase(
+        "Production", "acct-123", "BUY", "AAPL", 1.0
+    )
+    next(t for t in app.text_input if t.key == "order_auth_confirm").set_value(
+        phrase
+    ).run(timeout=30)
+    # Preview + correct phrase but the safety switch is still off -> blocked.
+    assert next(b for b in app.button if b.key == "order_auth_submit").disabled
+
+    next(c for c in app.checkbox if c.key == "order_auth_safety").set_value(True).run(
+        timeout=30
+    )
+    assert not next(b for b in app.button if b.key == "order_auth_submit").disabled
+
+
+def _completed_results():
+    from lego_pipeline import PipelineContext, dataframe_fingerprint, run_stage
+
+    raw = prepare_raw_frame(
+        pd.DataFrame(
+            [
+                {
+                    "created_at": "2026-07-13T14:20:00Z",
+                    "symbol": "AAPL",
+                    "status": "FILLED",
+                    "dna_step": 0,
+                    "dna_signal": 1,
+                    "last_price": 100.0,
+                    "quantity": 10.0,
+                    "decision_action": "BUY",
+                    "side": "BUY",
+                    "decision_reason": "BELOW_TARGET",
+                    "decision_order_qty": 1.5,
+                    "decision_value_now_usd": 1000.0,
+                }
+            ]
+        )
+    )
+    context = PipelineContext(
+        fix_c=1500.0, source_hash=dataframe_fingerprint(raw), dna_code=""
+    )
+    results = {}
+    previous = None
+    for number in range(1, 18):
+        results[number] = run_stage(number, raw, previous, context)
+        previous = results[number]
+    return raw, results
+
+
+def test_all_in_sidebar_exposes_the_same_guarded_order_panel_after_chain():
+    raw, results = _completed_results()
+
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_settings"] = ConnectionSettings(
+        "Test (UAT)", "acct-1", "key", "secret"
+    )
+    app.session_state["lego_symbol"] = "AAPL"
+    app.session_state["lego_raw"] = raw
+    app.session_state["lego_results"] = results
+    app.run(timeout=30)
+
+    assert not app.exception
+    # The All-in section now carries its own real-order panel, fired only through
+    # the same Preview + confirmation gate as the per-tab Manual Run.
+    assert any(button.key == "order_allin_preview" for button in app.button)
+    submit = next(b for b in app.button if b.key == "order_allin_submit")
+    assert submit.disabled
+
+
+def test_all_in_order_panel_is_hidden_until_the_chain_is_complete():
+    app = _authenticated_app().run(timeout=30)
+
+    assert not app.exception
+    # lego_results is empty, so no all-in order panel is offered yet.
+    assert not any(button.key == "order_allin_preview" for button in app.button)
 
 
 def test_sidebar_exposes_real_read_only_all_in_single_file():
