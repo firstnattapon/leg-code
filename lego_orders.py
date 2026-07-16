@@ -10,10 +10,9 @@ Design rules encoded here:
 
 * A live submit is only ever *allowed* by :func:`evaluate_submit_gate`, which is
   fail-closed: every missing safeguard is reported and any one of them blocks.
-* Production adds a mandatory safety switch on top of the Preview + typed
-  confirmation phrase that UAT already requires.  The phrase itself re-states the
-  environment, side, symbol, quantity, and a non-reversible account fingerprint
-  so the user must re-verify the account before a real-money order.
+* Production is read-only for this application.  Preview/Submit is available
+  only for Test (UAT), after Step 18 persisted an immutable READY_BUY/READY_SELL
+  row.
 * A broker ``SUBMITTED``/``PENDING`` acknowledgement is never reported as
   ``FILLED``.  Only an explicit filled status is eligible to be called realized.
 """
@@ -167,8 +166,8 @@ def evaluate_submit_gate(
         reasons.append("ต้อง Preview payload เดิมก่อน Submit")
     if not confirmation_ok:
         reasons.append("confirmation phrase ยังไม่ตรง")
-    if environment == PRODUCTION_ENVIRONMENT and not safety_switch:
-        reasons.append("Production ต้องเปิด safety switch")
+    if environment == PRODUCTION_ENVIRONMENT:
+        reasons.append("Production เป็น read-only; แอปนี้ส่ง order ได้เฉพาะ Test (UAT)")
     return SubmitGate(allowed=not reasons, reasons=tuple(reasons))
 
 

@@ -1,129 +1,42 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="th">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Webull LEGO Chain — แผน 5 ขั้น</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Webull LEGO One-New-Row Guide</title>
 <style>
-  :root{--bg:#faf7f2;--ink:#2b2b2b;--muted:#6f6a63;--gold:#b8894b;
-    --deep:#7a4b2b;--line:#e6ddd0;--card:#fff;--accent:#3d6b5e;--warn:#c0603a}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:"Sarabun","Segoe UI",system-ui,sans-serif;line-height:1.7}
-  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 80px}
-  header{text-align:center;padding:28px 0 8px;border-bottom:2px solid var(--gold)}
-  h1{margin:0;font-size:1.9rem;color:var(--deep)} header p{color:var(--muted)}
-  .goalbar,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
-    padding:14px 18px;margin:10px 0}.goalbar{border-left:5px solid var(--gold);margin:24px 0}
-  .goalbar b,.step h2{color:var(--deep)}.metric,.tag{display:inline-block;background:#f3ede2;
-    border-radius:8px;padding:3px 9px;margin:4px 4px 0 0;font-size:.86rem}
-  .step{margin:28px 0}.step h2{display:flex;align-items:center;gap:12px;font-size:1.25rem}
-  .num{display:inline-flex;width:34px;height:34px;border-radius:50%;background:var(--gold);
-    color:#fff;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}
-  .card h3{margin:0 0 5px;color:var(--accent);font-size:1rem}.why{color:var(--muted)}
-  .eq{font-family:"Cascadia Code",Consolas,monospace;background:#2b2b2b;color:#f5e9d6;
-    border-radius:8px;padding:10px 14px;margin:8px 0;overflow-x:auto}.eq small{color:var(--gold);display:block}
-  table{width:100%;border-collapse:collapse;margin:8px 0}th,td{border:1px solid var(--line);
-    padding:8px 10px;text-align:left;font-size:.9rem}th{background:#f3ede2;color:var(--deep)}
-  .loop{background:#fbf3ea;border:1px dashed var(--warn);border-radius:10px;padding:16px 20px}
-  code{background:#f3ede2;padding:2px 5px;border-radius:4px}footer{text-align:center;color:var(--muted);margin-top:40px}
-  @media(max-width:680px){table{display:block;overflow-x:auto}.wrap{padding:18px 12px 50px}}
+body{font-family:Segoe UI,Tahoma,sans-serif;background:#f7f5ef;color:#242424;margin:0}
+main{max-width:900px;margin:auto;padding:32px 20px 72px}
+h1,h2{color:#70451f}.card{background:#fff;border:1px solid #ddd4c6;border-radius:10px;padding:16px;margin:12px 0}
+code,pre{background:#252525;color:#f6e9ce;border-radius:8px;padding:12px;display:block;overflow:auto}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd4c6;padding:8px;text-align:left}th{background:#eee6d8}
+.ok{border-left:5px solid #35745b}.warn{border-left:5px solid #bd5c38}
 </style>
 </head>
-<body><div class="wrap">
-  <header>
-    <h1>🧱 Webull LEGO Chain Streamlit App</h1>
-    <p>แผน 5 ขั้น · Goals → Problems → Diagnosis → Design → Do it</p>
-  </header>
-
-  <div class="goalbar">
-    <b>🎯 Step 1 — เป้าหมาย:</b> สร้างแอป 19 แท็บที่รันทีละ LEGO หรือ All-in 0→18
-    โดยยิง Webull/Firestore จริง ถอด DNA seed+mutation ถูกหลัก และได้ Final DataFrame ถูก contract<br>
-    <span class="metric">ตัวชี้วัด: end-to-end acceptance ratio</span>
-    <span class="metric">ปัจจุบัน: 0 ratio</span><span class="metric">เป้า: 1 ratio</span>
-    <span class="metric">ระยะเวลา: ก่อน deploy ครั้งแรก</span>
-  </div>
-
-  <section class="step"><h2><span class="num">2</span>Problems — ช่องว่างที่ขวางอยู่</h2>
-    <div class="card"><h3>P1 — ข้อมูลต้องรวม Webull, Firestore และ CSV contract
-      <span class="tag">severity 5/5 · gap 30</span></h3></div>
-    <div class="card"><h3>P2 — ยังไม่มี strict sequential state machine
-      <span class="tag">severity 4/5 · gap 25</span></h3></div>
-    <div class="card"><h3>P3 — realized cash กับ what-if มีความหมายต่างกัน
-      <span class="tag">severity 5/5 · gap 20</span></h3></div>
-    <div class="card"><h3>P4 — UAT และ Cloud secrets ต้อง fail-closed
-      <span class="tag">severity 5/5 · gap 15</span></h3></div>
-    <div class="card"><h3>P5 — ต้องเพิ่ม tests/docs สำหรับแอปใหม่
-      <span class="tag">severity 4/5 · gap 10</span></h3></div>
-  </section>
-
-  <section class="step"><h2><span class="num">3</span>Diagnosis — รากของปัญหา</h2>
-    <div class="card"><h3>RC1 — Webull API ไม่มี DNA และ custom ledger <span class="tag">w=0.6</span></h3>
-      <ol class="why"><li>API ให้ข้อมูล broker</li><li>DNA และเหตุผลถูกเก็บใน Firestore</li></ol></div>
-    <div class="card"><h3>RC2 — CSV มี unnamed index และ nullable rows <span class="tag">w=0.4</span></h3>
-      <ol class="why"><li>export รวม index</li><li>ERROR/non-price rows ไม่มีค่าครบ</li></ol></div>
-    <div class="card"><h3>RC3 — Streamlit rerun ไม่มี dependency graph <span class="tag">w=1.0</span></h3>
-      <ol class="why"><li>widget เปลี่ยนแล้วสคริปต์ rerun</li><li>ผล downstream อาจค้างถ้าไม่ hash และ invalidate</li></ol></div>
-    <div class="card"><h3>RC4 — CSV ใช้ทุก quote แต่เงินจริงต้องอาศัย fill <span class="tag">w=1.0</span></h3>
-      <ol class="why"><li>ORDER_SUBMITTED ไม่ยืนยัน cash</li><li>ต้องมี execution price และ position reconciliation</li></ol></div>
-    <div class="card"><h3>RC5 — Cloud ถือ service account และ UAT capability <span class="tag">w=1.0</span></h3>
-      <ol class="why"><li>repository เป็น public</li><li>app ต้อง private และ output ต้อง redact</li></ol></div>
-    <div class="card"><h3>RC6 — tests เดิมยังไม่รู้จัก LEGO workflow <span class="tag">w=1.0</span></h3>
-      <ol class="why"><li>ไม่มี registry/state machine</li><li>ไม่มี gating และ audit tests</li></ol></div>
-  </section>
-
-  <section class="step"><h2><span class="num">4</span>Design — มาตรการจัดอันดับด้วย π = Δ/c</h2>
-    <table><thead><tr><th>อันดับ</th><th>มาตรการ</th><th>ยิงที่</th><th>Δ</th><th>c (ชม.)</th><th>π</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>typed stage registry + hybrid contract</td><td>RC1</td><td>30</td><td>8</td><td>3.75</td></tr>
-      <tr><td>2</td><td>hashed sequential state machine</td><td>RC3</td><td>25</td><td>8</td><td>3.125</td></tr>
-      <tr><td>3</td><td>แยก broker-confirmed และ what-if</td><td>RC4</td><td>20</td><td>8</td><td>2.5</td></tr>
-      <tr><td>4</td><td>UAT confirmation, redaction, audit</td><td>RC5</td><td>15</td><td>6</td><td>2.5</td></tr>
-      <tr><td>5</td><td>regression, AppTest, deployment guide</td><td>RC6</td><td>10</td><td>6</td><td>1.667</td></tr>
-    </tbody></table>
-  </section>
-
-  <section class="step"><h2><span class="num">5</span>Do it — ลงมือ + วัดผล</h2>
-    <table><thead><tr><th>Phase</th><th>การกระทำ</th><th>ผู้รับผิดชอบ</th><th>พึ่งพา</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>สร้าง JSON plan และ offline HTML</td><td>Codex</td><td>—</td></tr>
-      <tr><td>1–2</td><td>สร้าง pipeline registry และ dual ledger</td><td>Codex</td><td>S1, S3</td></tr>
-      <tr><td>2–3</td><td>สร้าง 17 Single-File LEGO blocks พร้อม Goal, Quick Start และ CLI</td><td>Codex</td><td>S1, S2</td></tr>
-      <tr><td>2–4</td><td>สร้าง real read-only All-in Single File + sidebar loop 0→18</td><td>Codex</td><td>S1, S2, S4</td></tr>
-      <tr><td>2–3</td><td>สร้าง 19-tab Streamlit state machine</td><td>Codex</td><td>S2</td></tr>
-      <tr><td>3–4</td><td>เชื่อม Webull, Firestore, UAT audit</td><td>Codex</td><td>S4</td></tr>
-      <tr><td>4–5</td><td>เพิ่ม tests, README, Cloud checklist</td><td>Codex</td><td>S5</td></tr>
-    </tbody></table>
-
-    <h3>สมการวัดผล</h3>
-    <div class="eq"><small>Stage completion</small>successful_stage_runs / 17 → target 1.0</div>
-    <div class="eq"><small>Contract conformance</small>passed_contract_assertions / all_contract_assertions → target 1.0</div>
-    <div class="eq"><small>Regression pass rate</small>passed_tests / total_tests → target 1.0</div>
-    <div class="eq"><small>Goal attainment</small>A = G_achieved / G_target</div>
-    <div class="eq"><small>Progress ratio</small>P = (G_n − G_0) / (G_target − G_0)</div>
-    <div class="eq"><small>Weighted quality</small>S = 0.40·stage + 0.35·contract + 0.25·tests</div>
-
-    <div class="loop"><h3>🔁 Control loop</h3>
-      <div class="eq"><small>Error</small>e_n = G_target − G_n</div>
-      <div class="eq"><small>Convergence</small>r_n = |e_n| / |e_(n−1)|</div>
-      <p><b>หยุด:</b> เมื่อ |e_n| ≤ ε = 0.01 · K = 0.5 · n_max = 5</p>
-      <table><tr><th>สถานการณ์</th><th>วนกลับไป</th><th>การแก้</th></tr>
-        <tr><td>r_n &lt; 1</td><td>Step 5</td><td>แก้ acceptance failure รอบถัดไป</td></tr>
-        <tr><td>r_n ≈ 1</td><td>Step 3</td><td>ทบทวน root cause และ contract</td></tr>
-        <tr><td>r_n &gt; 1</td><td>Step 2</td><td>ทบทวน problem/data boundary</td></tr>
-        <tr><td>ครบหลายรอบยังห่าง</td><td>Step 1</td><td>ปรับเป้าหรือแบ่ง release</td></tr>
-      </table>
-    </div>
-  </section>
-
-  <section class="step"><h2>กติกาที่ล็อกแล้ว</h2>
-    <div class="card">19 tabs: Auth → 17 manual blocks → Final DataFrame</div>
-    <div class="card">ทุก block เป็น Python Single File: มี Goal, Quick Start, validation และ CLI ในตัว</div>
-    <div class="card">All-in ยิง Account list, Balance, Positions, Quote และ Firestore จริงทั้ง Test/Production</div>
-    <div class="card">DNA encoded ใช้ width/value → base seed → mutation seeds; logged signal มีสิทธิ์ก่อน</div>
-    <div class="card">Production ไม่มี mutation path; UAT ใช้ Preview และ confirmation แยก</div>
-    <div class="card">Firebase credentials อยู่ใน Streamlit secrets และแอปต้อง private</div>
-    <div class="card">Final หลักเป็น broker-confirmed; what-if แสดงเป็นคนละ data product</div>
-  </section>
-
-  <footer>สร้างด้วย five-step-planner · ไฟล์ทำงาน offline และไม่เรียก external resource</footer>
-</div></body></html>
+<body><main>
+<h1>Webull LEGO 0→18 — One New Row</h1>
+<div class="card ok"><b>หลักการ:</b> หนึ่ง run อ่าน Webull snapshot หนึ่งชุด ใช้ latest final anchor หนึ่งแถว และ append final document หนึ่งรายการ</div>
+<h2>Flow</h2>
+<pre>Step 0: Account + Balance + Positions + Quote + latest anchor
+Step 1–17: calculate one draft row
+Step 18: validate + Firestore transaction
+After Step 18: optional UAT Preview/Submit</pre>
+<h2>สูตร</h2>
+<pre>Rₙ  = FIX_C × ln(Pₙ/P₀)
+ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)
+Aₙ  = Aₙ₋₁ + ΔAₙ
+Eₙ  = Aₙ − Rₙ</pre>
+<h2>สถานะ</h2>
+<table><tr><th>เงื่อนไข</th><th>สถานะ</th></tr>
+<tr><td>DNA signal = 0</td><td>PASS_DNA_ZERO</td></tr>
+<tr><td>|gap| ≤ DIFF</td><td>PASS_THRESHOLD</td></tr>
+<tr><td>gap &gt; DIFF</td><td>READY_BUY</td></tr>
+<tr><td>gap &lt; −DIFF</td><td>READY_SELL</td></tr></table>
+<h2>Firestore</h2>
+<div class="card">
+<b>webull_lego_rows</b> — final rows<br>
+<b>webull_lego_state</b> — latest pointer/version<br>
+<b>webull_lego_order_audit</b> — redacted UAT audit
+</div>
+<div class="card warn"><b>Safety:</b> ไม่มี order panel ก่อน persisted Step 18, PASS ส่งไม่ได้ และ Production เป็น read-only</div>
+</main></body></html>
