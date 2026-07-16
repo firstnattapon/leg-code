@@ -80,6 +80,9 @@ class LegoDashboardConfig:
     audit_collection: str = "webull_lego_uat_audit"
     trade_limit: int = 100
     fix_c: float = 1500.0
+    # Set false when the service account is read-only: audit stays session-only
+    # (downloadable) and no Firestore write is attempted, so no permission noise.
+    audit_to_firestore: bool = True
 
 
 def _secret_section(name: str) -> dict[str, Any]:
@@ -109,7 +112,16 @@ def load_dashboard_config() -> LegoDashboardConfig:
         ).strip(),
         trade_limit=trade_limit,
         fix_c=fix_c,
+        audit_to_firestore=_coerce_bool(lego.get("audit_to_firestore", True)),
     )
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Accept native TOML booleans and common string spellings."""
+
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def connection_fingerprint(
@@ -167,6 +179,9 @@ def record_audit(event: dict[str, Any]) -> str | None:
     db = st.session_state.get("lego_db")
     config = st.session_state.get("lego_config")
     if db is None or config is None:
+        return None
+    # Read-only deployments opt out entirely: session audit only, no write, no noise.
+    if not getattr(config, "audit_to_firestore", True):
         return None
     try:
         db.collection(config.audit_collection).document(event["event_id"]).set(event)

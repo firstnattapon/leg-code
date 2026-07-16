@@ -324,6 +324,39 @@ def test_order_survives_a_denied_firestore_audit_write(monkeypatch):
     )
 
 
+def test_read_only_deployment_can_opt_out_of_firestore_audit(monkeypatch):
+    import types
+
+    import manual_tools
+
+    monkeypatch.setattr(manual_tools, "WebullManualClient", _FakeClient)
+
+    app = _authenticated_app("Test (UAT)")
+    app.session_state["lego_db"] = _AuditDeniedDB()  # would 403 if ever written to
+    app.session_state["lego_config"] = types.SimpleNamespace(
+        audit_collection="webull_lego_uat_audit", audit_to_firestore=False
+    )
+    app.run(timeout=30)
+
+    next(b for b in app.button if b.key == "order_auth_preview").click().run(timeout=30)
+
+    assert not app.exception
+    # The order ran and the audit is retained in session, with no Firestore write.
+    assert app.session_state["order_auth_output"]["action"] == "PREVIEW"
+    assert len(app.session_state["lego_audit_events"]) == 1
+    assert not any("Firestore" in warning.value for warning in app.warning)
+
+
+def test_audit_to_firestore_flag_parses_from_secrets():
+    from lego_dashboard import _coerce_bool
+
+    assert _coerce_bool(False) is False
+    assert _coerce_bool(True) is True
+    assert _coerce_bool("false") is False
+    assert _coerce_bool("true") is True
+    assert _coerce_bool("no") is False
+
+
 def test_sidebar_exposes_real_read_only_all_in_single_file():
     source = Path("lego_dashboard.py").read_text(encoding="utf-8")
     single_file = Path("webull_lego_single_file.py").read_text(encoding="utf-8")

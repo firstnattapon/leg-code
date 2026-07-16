@@ -68,7 +68,13 @@ trade_collection = "shannon_demon_trades"
 audit_collection = "webull_lego_uat_audit"
 trade_limit = 100
 fix_c = 1500.0
+audit_to_firestore = true   # ตั้ง false ถ้า service account เป็น read-only
 ```
+
+หาก service account เป็นแบบอ่านอย่างเดียว (เช่น `*-reader`) จะเขียน audit ลง Firestore
+ไม่ได้ (403). ตั้ง `audit_to_firestore = false` เพื่อให้ audit เก็บใน session และดาวน์โหลด
+ได้ที่ Tab 18 โดยไม่พยายามเขียน Firestore — หรือให้ service account มีสิทธิ์เขียน
+`webull_lego_uat_audit` / ปรับ Firestore security rules ถ้าต้องการเก็บ audit บน Firestore
 
 ### Deploy บน Streamlit Community Cloud
 
