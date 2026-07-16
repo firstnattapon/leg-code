@@ -177,6 +177,31 @@ def _download_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _auth_summary_metrics(
+    summary: dict[str, Any],
+    raw: Any,
+) -> tuple[int, int, int, str]:
+    """Read Step-0 metrics without trusting a stale Streamlit session schema."""
+
+    snapshot_rows = summary.get("snapshot_rows")
+    if snapshot_rows is None:
+        snapshot_rows = len(raw) if isinstance(raw, pd.DataFrame) else 0
+
+    anchor = summary.get("anchor")
+    anchor_version = (
+        anchor.get("version", 0)
+        if isinstance(anchor, dict)
+        else summary.get("anchor_version", 0)
+    )
+    run_id = str(summary.get("run_id") or "")
+    return (
+        int(snapshot_rows),
+        int(summary.get("old_trade_log_reads", 0)),
+        int(anchor_version or 0),
+        run_id[:10] or "—",
+    )
+
+
 def authenticate_and_load(
     settings: ConnectionSettings,
     config: LegoDashboardConfig,
@@ -689,14 +714,21 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
     summary = st.session_state.get("lego_auth_summary")
     if isinstance(summary, dict):
         st.success("Step 0 สำเร็จ — สร้าง immutable draft source 1 แถว")
+        raw = st.session_state.get("lego_raw")
+        snapshot_rows, old_trade_log_reads, anchor_version, run_id = (
+            _auth_summary_metrics(summary, raw)
+        )
         metrics = st.columns(4)
-        metrics[0].metric("Snapshot rows", summary["snapshot_rows"])
-        metrics[1].metric("Old trade-log reads", summary["old_trade_log_reads"])
-        metrics[2].metric("Anchor version", summary["anchor"]["version"])
-        metrics[3].metric("Run ID", summary["run_id"][:10])
+        metrics[0].metric("Snapshot rows", snapshot_rows)
+        metrics[1].metric("Old trade-log reads", old_trade_log_reads)
+        metrics[2].metric("Anchor version", anchor_version)
+        metrics[3].metric("Run ID", run_id)
         with st.expander("Authenticated output (redacted)", expanded=True):
             st.json(redact_payload(summary))
-        st.dataframe(st.session_state.lego_raw, use_container_width=True)
+        if isinstance(raw, pd.DataFrame):
+            st.dataframe(raw, use_container_width=True)
+        else:
+            st.warning("Step 0 session เก่าไม่ครบถ้วน — กรุณา Connect ใหม่")
     elif not config.firebase_info:
         st.warning("ยังไม่มี [firebase_service_account] ใน Streamlit secrets")
 
