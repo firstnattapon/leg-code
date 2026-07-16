@@ -216,6 +216,68 @@ def test_production_submit_requires_the_safety_switch(monkeypatch):
     assert not next(b for b in app.button if b.key == "order_auth_submit").disabled
 
 
+def _completed_results():
+    from lego_pipeline import PipelineContext, dataframe_fingerprint, run_stage
+
+    raw = prepare_raw_frame(
+        pd.DataFrame(
+            [
+                {
+                    "created_at": "2026-07-13T14:20:00Z",
+                    "symbol": "AAPL",
+                    "status": "FILLED",
+                    "dna_step": 0,
+                    "dna_signal": 1,
+                    "last_price": 100.0,
+                    "quantity": 10.0,
+                    "decision_action": "BUY",
+                    "side": "BUY",
+                    "decision_reason": "BELOW_TARGET",
+                    "decision_order_qty": 1.5,
+                    "decision_value_now_usd": 1000.0,
+                }
+            ]
+        )
+    )
+    context = PipelineContext(
+        fix_c=1500.0, source_hash=dataframe_fingerprint(raw), dna_code=""
+    )
+    results = {}
+    previous = None
+    for number in range(1, 18):
+        results[number] = run_stage(number, raw, previous, context)
+        previous = results[number]
+    return raw, results
+
+
+def test_all_in_sidebar_exposes_the_same_guarded_order_panel_after_chain():
+    raw, results = _completed_results()
+
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_settings"] = ConnectionSettings(
+        "Test (UAT)", "acct-1", "key", "secret"
+    )
+    app.session_state["lego_symbol"] = "AAPL"
+    app.session_state["lego_raw"] = raw
+    app.session_state["lego_results"] = results
+    app.run(timeout=30)
+
+    assert not app.exception
+    # The All-in section now carries its own real-order panel, fired only through
+    # the same Preview + confirmation gate as the per-tab Manual Run.
+    assert any(button.key == "order_allin_preview" for button in app.button)
+    submit = next(b for b in app.button if b.key == "order_allin_submit")
+    assert submit.disabled
+
+
+def test_all_in_order_panel_is_hidden_until_the_chain_is_complete():
+    app = _authenticated_app().run(timeout=30)
+
+    assert not app.exception
+    # lego_results is empty, so no all-in order panel is offered yet.
+    assert not any(button.key == "order_allin_preview" for button in app.button)
+
+
 def test_sidebar_exposes_real_read_only_all_in_single_file():
     source = Path("lego_dashboard.py").read_text(encoding="utf-8")
     single_file = Path("webull_lego_single_file.py").read_text(encoding="utf-8")

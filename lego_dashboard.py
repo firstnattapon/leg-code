@@ -975,8 +975,9 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
     with st.sidebar:
         st.header("🧱 All-in Loop 0→18")
         st.caption(
-            "ยิง Webull API + Firestore ใหม่จริง แล้วต่อ LEGO 17 ขั้นและ Final "
-            "ในคลิกเดียว ไม่ส่งหรือยกเลิก order"
+            "ยิง Webull API + Firestore ใหม่จริง แล้วต่อ LEGO 17 ขั้นและ Final ในคลิกเดียว "
+            "(loop เป็น read-only) จากนั้นยิง order จริงได้ที่ order panel ด้านล่าง "
+            "ด้วย submit gate เดียวกับ Manual Run"
         )
         settings: ConnectionSettings | None = st.session_state.get("lego_settings")
         if settings is None:
@@ -984,7 +985,7 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
         else:
             st.info(
                 f"{settings.environment} · {settings.endpoint} · "
-                "All-in loop = read-only reads (ไม่ส่ง order · ใช้ order panel ในแต่ละแท็บ)"
+                "All-in loop = read-only reads · order panel ยิงจริงอยู่ด้านล่าง"
             )
 
         status = st.session_state.get("lego_all_in_status")
@@ -1080,6 +1081,28 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
             key="lego_download_all_in_sidebar",
         )
         st.caption("ไฟล์เดียว · env credentials · Test/Production real reads · no mutation")
+
+        # All-in REAL order — run the chain read-only above, then fire the final
+        # decision through the SAME guarded submit gate as the per-tab Manual Run
+        # (Preview → confirmation phrase → Production safety switch → Submit).
+        st.divider()
+        st.markdown("**🔴 All-in REAL order (เหมือน Manual Run)**")
+        results = st.session_state.get("lego_results", {})
+        if settings is None:
+            st.info("ต้อง Connect & Load ที่ Tab 0 ก่อน")
+        elif 17 not in results:
+            st.caption(
+                "กด Run ALL 0 → 18 ให้ครบก่อน แล้ว order panel จะพร้อมยิงจริงที่นี่"
+            )
+        else:
+            symbol0, side0, qty0 = _order_defaults_from_row(results.get(17))
+            render_order_panel(
+                "allin",
+                config,
+                default_symbol=symbol0,
+                default_side=side0,
+                default_quantity=qty0,
+            )
 
 
 if "lego_session_run_id" not in st.session_state:

@@ -29,7 +29,10 @@ DataFrame ที่ Tab 18
 
 - [LEARNING_GUIDE.md](LEARNING_GUIDE.md) อธิบาย DNA seed+mutation, API จริง และ ledger
 - Sidebar `Run ALL 0 → 18 (REAL READ)` ยิง Account/Balance/Positions/Quote + Firestore
-  ใหม่จริง แล้วต่อครบทุกขั้นในคลิกเดียว
+  ใหม่จริง แล้วต่อครบทุกขั้นในคลิกเดียว (loop เป็น read-only)
+- หลัง All-in สำเร็จ Sidebar จะมี **All-in REAL order** panel ที่ยิง Webull Order API จริง
+  จาก final decision ของ chain โดยใช้ submit gate เดียวกับ Manual Run: ต้อง Preview →
+  พิมพ์ confirmation phrase → (Production) เปิด safety switch → กด Submit เอง
 - [webull_lego_single_file.py](webull_lego_single_file.py) เป็นไฟล์เดียวที่รัน 0→18
   ได้โดยไม่ import โมดูลในโปรเจกต์ และรองรับ Test/Production read-only
 

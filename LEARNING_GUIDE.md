@@ -148,6 +148,6 @@ read-only loop ทำซ้ำได้โดยไม่สร้าง side ef
 - Step 14–17 = เชื่อเฉพาะ fill ที่พิสูจน์ได้
 - Step 18 = export
 - Manual Run = เรียนทีละ LEGO
-- All-in = ยิง API ใหม่และต่อครบทุก LEGO (read-only)
-- Order panel = มีทุกแท็บ ส่ง order จริงเมื่อกด Submit เอง
+- All-in = ยิง API ใหม่และต่อครบทุก LEGO (read-only) + มี order panel ยิงจริงในตัว เหมือน Manual Run
+- Order panel = มีทุกแท็บและใน All-in ส่ง order จริงเมื่อกด Submit เอง
 - Production = ส่ง order เงินจริงได้เฉพาะเมื่อเปิด safety switch + confirmation phrase
