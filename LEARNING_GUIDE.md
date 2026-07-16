@@ -1,7 +1,11 @@
-# Learning Guide — Webull LEGO 0→18 ฉบับใช้งานจริง
+# Learning Guide — Webull LEGO 0→18 (one new row)
 
 อ่านหน้านี้ก่อน 5 นาที แล้วเริ่มได้จาก `lego_dashboard.py` หรือไฟล์เดียว
 `webull_lego_single_file.py`
+
+หลักการใหม่: **หนึ่ง run สร้าง row ใหม่เพียงแถวเดียว** จาก Webull snapshot ปัจจุบัน
+หนึ่งชุด + anchor ล่าสุดหนึ่งแถวของ chain เดียวกัน ไม่ใช่การดึงประวัติหลายแถวมา
+เติมคอลัมน์ย้อนหลัง
 
 หลัก DNA และ early-exit chain อ้างอิงจาก
 [Shannon Demon DNA Bot Learning Guide](https://github.com/firstnattapon/webull/blob/main/doc/LEARNING_GUIDE.md)
@@ -18,9 +22,9 @@ python -m streamlit run lego_dashboard.py
 ```
 
 1. เปิด Tab 0 และเลือก `Test (UAT)` หรือ `Production`
-2. ใส่ Account ID, App Key, App Secret, symbol และ DNA_CODE
-3. กด `Connect & Load` เพื่ออ่าน API จริง หรือกด `Run ALL 0 → 18 (REAL READ)`
-   ที่ sidebar หลังเชื่อมต่อแล้ว
+2. ใส่ Account ID, App Key, App Secret, **symbol (จำเป็น)** และ DNA_CODE
+3. กด `Connect & Load` เพื่ออ่าน snapshot จริง + anchor ล่าสุด แล้วเดิน Step 1–17
+   หรือกด `Run ALL 0 → 18` ที่ sidebar เพื่อ read → compute → append ในคลิกเดียว
 
 ### Single File
 
@@ -33,8 +37,8 @@ $env:GOOGLE_APPLICATION_CREDENTIALS="C:\safe\firebase.json"
 python webull_lego_single_file.py --environment "Test (UAT)" --symbol AAPL --dna-code "bypass:100"
 ```
 
-เปลี่ยนเป็น `--environment Production` เมื่อต้องการอ่านบัญชี Production จริง
-ไฟล์ All-in ไม่มีเมธอด place/cancel จึงเป็น read-only ทั้งสอง environment
+ไฟล์เดียวนี้เป็น read-only: อ่าน snapshot + anchor แล้วคำนวณ row เดียว ไม่มีเมธอด
+place/cancel และไม่ append Firestore การ append transaction ทำที่ Streamlit Step 18
 
 ## Step 0 อ่านอะไรจริง
 
@@ -45,17 +49,22 @@ python webull_lego_single_file.py --environment "Test (UAT)" --symbol AAPL --dna
 | Test (UAT) | `th-api.uat.webullbroker.com` |
 | Production | `api.webull.co.th` |
 
-Step 0 เรียก idempotent read endpoints เหล่านี้จริง:
+Step 0 อ่าน **snapshot ชุดเดียว** และ anchor ของ chain เท่านั้น:
 
 1. Account list
 2. Account balance
-3. Account positions
-4. Market snapshot เมื่อมี symbol
-5. Firestore trade collection ตามค่า `[lego_dashboard]`
+3. Account positions → ใช้เป็น `holdings` ของ symbol
+4. Market snapshot (quote) → ใช้เป็น `ราคา Pₙ`
+5. `webull_lego_state/{chain_key}` → latest anchor (P₀, Pₙ₋₁, Aₙ₋₁, DNA step, version)
 
+**ไม่มีการอ่าน `shannon_demon_trades` หรือประวัติหลายแถว** (`old_trade_log_reads = 0`)
 read calls retry ได้สูงสุด 3 ครั้งเมื่อเป็น network/429/5xx แต่ authentication หรือ
 validation error จะหยุดทันที Credentials อยู่เฉพาะ session memory และไม่ถูกเขียนลง
-DataFrame, JSON download หรือ audit
+final row, JSON download หรือ audit
+
+`chain_key = hash(environment, account fingerprint, symbol, strategy_config_hash)`
+โดย `strategy_config_hash` ครอบคลุม strategy id, FIX_C, DIFF, DNA hash และ decimal
+precision — เปลี่ยนค่าใดค่าหนึ่งจะเริ่ม chain ใหม่
 
 ## DNA decode ที่ถูกหลักการ
 
@@ -84,70 +93,95 @@ DNA ไม่ใช่การสุ่มใหม่ทุกครั้ง 
 
 ทั้งสองแบบหมายถึง sequence เลข 1 จำนวน 100 ขั้น เหมาะกับการทดสอบเท่านั้น
 
-### กฎ provenance
+### DNA step และ signal ของแถวใหม่
 
-`dna_signal` ที่บอทบันทึกใน Firestore มีสิทธิ์ก่อนเสมอ Decoder เติมเฉพาะแถวที่
-signal ว่างและมี `dna_step` เป็นจำนวนเต็มไม่ติดลบภายในช่วง sequence เท่านั้น
-จึงไม่แก้ประวัติจริงและไม่สร้าง step ขึ้นมาเอง
+`DNA step` ของแถวใหม่ = DNA step ของ anchor ล่าสุด + 1 (chain ใหม่เริ่มที่ 0)
+`DNA signal` = bit ที่ตำแหน่ง `DNA step` ของ sequence ที่ decode แล้ว เป็น
+deterministic ล้วน ถ้า `DNA step` เกินความยาว sequence จะ **fail-closed** ทันที
+(DNA exhausted) ไม่เดาค่าและไม่คำนวณต่อ
 
-## LEGO chain ทำงานอย่างไร
-
-```text
-0 real Webull + Firestore reads
-  → 1 เวลา UTC
-  → 2 สินทรัพย์
-  → 3 สถานะ
-  → 4 DNA step
-  → 5 DNA signal (logged first, decoder fallback)
-  → 6 ราคา quote
-  → 7 holdings ที่ Webull ยืนยัน
-  → 8–13 decision fields + FIX_C gap
-  → 14–17 broker-confirmed execution ledger
-  → 18 Final DataFrame + separate what-if
-```
-
-การกด Run รายแท็บยังบังคับลำดับและเหมาะกับการเรียนทีละบล็อก ส่วน All-in sidebar
-เรียก Step 0 ใหม่จริง แล้วรัน 1→18 ใน loop เดียว ผลลัพธ์ของทั้งสองทางใช้ contract
-17 คอลัมน์เดียวกัน
-
-## เงินจริงกับ what-if ห้ามปะปน
-
-Broker-confirmed ledger ต้องมีครบทุกข้อ:
-
-- terminal fill status
-- cumulative filled quantity มากกว่า 0
-- execution price จริง (ห้ามใช้ quote แทน)
-- `position_reconciled is True`
-- order ID เพื่อ deduplicate cumulative partial fills
-- fee จะถูกหักเมื่อ log มี cumulative fee
-
-เมื่อหลักฐานไม่ครบ ค่า `Rₙ/ΔAₙ/Aₙ/Eₙ` หลักจะว่าง การว่างเป็นผลที่ถูกต้อง
-
-What-if เป็นตารางแยก ใช้ positive quote ทุกจุด:
+## LEGO chain ทำงานอย่างไร (row เดียว)
 
 ```text
-ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)
-Aₙ  = ΣΔAₙ
-Rₙ  = FIX_C × ln(Pₙ/P₀)
-Eₙ  = Aₙ − Rₙ
+0 snapshot ชุดเดียว (positions + quote) + latest anchor
+  → 1 เวลา UTC ของ snapshot
+  → 2 สินทรัพย์ (symbol ที่เลือก)
+  → 3 สถานะ (SNAPSHOT_READY ระหว่าง draft)
+  → 4 DNA step = anchor + 1 หรือ 0
+  → 5 DNA signal (deterministic จาก DNA_CODE)
+  → 6 ราคา Pₙ (live quote)
+  → 7 holdings (live positions)
+  → 8 สร้าง decision object ครั้งเดียว
+  → 9–13 side / reason / quantity / value / gap จาก decision เดียวกัน
+  → 14–17 price-path recurrence จาก anchor
+  → 18 validate 17 คอลัมน์ + append transaction (idempotent, stale-anchor guard)
 ```
 
-## เหตุผลที่ All-in ไม่ส่ง order
+Manual Run รายแท็บบังคับลำดับและเปิดเผยคอลัมน์ทีละคอลัมน์ของ row เดียว ส่วน All-in
+sidebar ทำ read → compute → append ในคลิกเดียว ทั้งสองทางเรียก engine เดียวกัน
+(`lego_one_row.py`) จึงได้ row ผลลัพธ์เดียวกันทุกประการ
 
-read-only loop ทำซ้ำได้โดยไม่สร้าง side effect จึงเหมาะกับ Test และ Production
-การส่ง order จริงจะแยกออกมาที่ **order panel** ซึ่งอยู่ในทุกแท็บ 0–18 และแยกจากปุ่ม Run
-เสมอ ต้อง Preview payload เดิมก่อน, พิมพ์ confirmation phrase ให้ตรง และ (Production)
-เปิด safety switch + ทวน account/symbol/side/quantity ก่อนยิง `place_order` จริง จากนั้น
-ใช้ Query อ่านสถานะ · `SUBMITTED`/`PENDING` ไม่ถูกนับเป็น `FILLED` · การวิเคราะห์ข้อมูล
-(All-in/Run) จะไม่แอบเปลี่ยนบัญชี
+## Decision object (Step 8 ครั้งเดียว)
+
+```text
+value_now = holdings × price
+gap       = FIX_C − value_now
+ถ้า DNA signal = 0      → PASS_DNA_ZERO
+ไม่งั้นถ้า |gap| ≤ DIFF  → PASS_THRESHOLD
+ไม่งั้นถ้า gap > DIFF    → READY_BUY  (side = BUY)
+ไม่งั้น (gap < −DIFF)    → READY_SELL (side = SELL)
+quantity = round(|gap| / price, decimal_precision)   # PASS = 0
+```
+
+Step 9–13 เพียง **เปิดเผย** field จาก decision object เดียวกัน ไม่คำนวณซ้ำ
+
+## Price-path recurrence (Step 14–17)
+
+คอลัมน์ `Rₙ/ΔAₙ/Aₙ/Eₙ` เป็น **price-path recurrence** จาก current quote และ anchor
+เพียงแถวเดียว ไม่ใช่ broker execution ledger และไม่สแกนประวัติ fill:
+
+```text
+แถวแรก (genesis):  P₀ = Pₙ,  R₀ = ΔA₀ = A₀ = E₀ = 0
+แถวถัดไป:
+  Rₙ  = FIX_C × ln(Pₙ / P₀)
+  ΔAₙ = FIX_C × (Pₙ / Pₙ₋₁ − 1)
+  Aₙ  = Aₙ₋₁ + ΔAₙ
+  Eₙ  = Aₙ − Rₙ
+```
+
+`P₀`, `Pₙ₋₁`, `Aₙ₋₁` มาจาก anchor ที่ persist ไว้ (`webull_lego_state`) ค่าเงินคำนวณ
+full precision และ round เป็น 2 ตำแหน่งเฉพาะตอนแสดง/ดาวน์โหลด
+
+## Step 18 — append แบบ transaction
+
+Step 18 ทำ Firestore transaction เดียว:
+
+1. ตรวจว่า anchor ที่ Step 0 อ่านมายังเป็น latest (`anchor.version == state.version`)
+   ถ้าไม่ใช่ → **stale anchor** ปฏิเสธแบบ fail-closed และให้เริ่ม Step 0 ใหม่
+2. ถ้า `run_id` เดิมถูกบันทึกแล้ว → คืน **idempotent success** ไม่สร้างเอกสารซ้ำ
+3. สร้าง `webull_lego_rows/{run_id}` และอัปเดต `webull_lego_state/{chain_key}` พร้อมกัน
+
+`run_id` เป็น deterministic จาก chain, anchor version และ snapshot ที่จับไว้ กด Step 18
+ซ้ำใน run เดียวจึงไม่เพิ่มเอกสาร (`N_after − N_before = 1` ต่อ successful run เท่านั้น)
+
+## Order panel — หลัง Step 18, UAT เท่านั้น
+
+การส่ง order จริงอยู่ **หลัง Step 18** และแยกจากปุ่มคำนวณเสมอ:
+
+- เปิดเฉพาะ **UAT** และเฉพาะ final row ที่เป็น `READY_BUY`/`READY_SELL`
+- **Production เป็น read-only** แบบ fail-closed (ไม่มีปุ่ม Submit)
+- payload มาจาก final row ที่บันทึกแล้ว (`client_order_id` deterministic จาก `run_id`)
+  ต้อง Preview payload เดิมก่อน แล้วพิมพ์ confirmation phrase ให้ตรงจึงกด Submit ได้
+- ผลถูก redact เขียนลง `webull_lego_order_audit` แยกจากสถานะผลการคำนวณ; `SUBMITTED`/
+  `PENDING` ไม่ถูกนับเป็น `FILLED`
 
 ## จำง่ายสำหรับมือใหม่
 
-- Tab 0 = อ่านของจริง
-- Step 1–13 = จัดข้อมูลและอธิบาย decision
-- Step 14–17 = เชื่อเฉพาะ fill ที่พิสูจน์ได้
-- Step 18 = export
-- Manual Run = เรียนทีละ LEGO
-- All-in = ยิง API ใหม่และต่อครบทุก LEGO (read-only) + มี order panel ยิงจริงในตัว เหมือน Manual Run
-- Order panel = มีทุกแท็บและใน All-in ส่ง order จริงเมื่อกด Submit เอง
-- Production = ส่ง order เงินจริงได้เฉพาะเมื่อเปิด safety switch + confirmation phrase
+- Tab 0 = อ่าน snapshot จริง 1 ชุด + anchor 1 แถว (ไม่มี trade log)
+- Step 1–7 = คัดค่าจาก snapshot
+- Step 8–13 = decision object เดียว
+- Step 14–17 = price-path recurrence จาก anchor แถวเดียว
+- Step 18 = validate + append transaction (idempotent, stale-anchor guard)
+- Manual Run = เปิดเผยทีละคอลัมน์ของ row เดียว
+- All-in = read → compute → append ในคลิกเดียว ให้ row เดียวกับ Manual
+- Order panel = หลัง Step 18, UAT + READY_BUY/READY_SELL เท่านั้น, Production read-only

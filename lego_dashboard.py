@@ -35,7 +35,6 @@ from lego_one_row import (
     STATUS_READY_BUY,
     STATUS_READY_SELL,
     ComputedRow,
-    PipelineError,
     RunContext,
     StrategyParameters,
     account_fingerprint,
@@ -51,7 +50,6 @@ from lego_one_row import (
 from lego_state import (
     ORDER_AUDIT_COLLECTION,
     FirestoreStateStore,
-    InMemoryStateStore,
     StaleAnchorError,
     finalize_row,
     read_anchor_state,
