@@ -446,7 +446,26 @@ def render_order_panel(
     """
 
     st.divider()
-    st.subheader("🔴 ส่งคำสั่งซื้อขายจริงผ่าน Webull Order API")
+    with st.expander("🔴 ส่งคำสั่งซื้อขายจริงผ่าน Webull Order API", expanded=False):
+        _render_order_panel_body(
+            tab_key,
+            config,
+            default_symbol=default_symbol,
+            default_side=default_side,
+            default_quantity=default_quantity,
+        )
+
+
+def _render_order_panel_body(
+    tab_key: str,
+    config: LegoDashboardConfig,
+    *,
+    default_symbol: str = "",
+    default_side: str = "BUY",
+    default_quantity: float = 1.0,
+) -> None:
+    """Body of :func:`render_order_panel`, rendered inside a collapsed expander."""
+
     settings: ConnectionSettings | None = st.session_state.get("lego_settings")
     if settings is None:
         st.info(
@@ -677,19 +696,21 @@ def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
     st.subheader(f"Step {stage.number} — {stage.title}")
     st.markdown(f"**Goal:** {stage.goal}")
     st.info(f"Quick Start: {stage.quick_start}")
-    st.markdown("#### LEGO code block ที่จะรัน — Single File")
-    st.caption(
-        f"{stage.file_name} · คัดลอกหรือดาวน์โหลดไฟล์เดียวแล้วรันได้ · "
-        "ฟังก์ชัน transform ในไฟล์นี้คือ callable เดียวกับปุ่ม Run"
-    )
-    st.code(source_code, language="python")
-    st.download_button(
-        "Download Single-File LEGO Block",
-        data=source_code,
-        file_name=stage.file_name,
-        mime="text/x-python",
-        key=f"lego_download_stage_{stage.number}",
-    )
+    with st.expander(
+        "LEGO code block ที่จะรัน — Single File", expanded=False
+    ):
+        st.caption(
+            f"{stage.file_name} · คัดลอกหรือดาวน์โหลดไฟล์เดียวแล้วรันได้ · "
+            "ฟังก์ชัน transform ในไฟล์นี้คือ callable เดียวกับปุ่ม Run"
+        )
+        st.code(source_code, language="python")
+        st.download_button(
+            "Download Single-File LEGO Block",
+            data=source_code,
+            file_name=stage.file_name,
+            mime="text/x-python",
+            key=f"lego_download_stage_{stage.number}",
+        )
 
     raw: pd.DataFrame | None = st.session_state.get("lego_raw")
     results: dict[int, StageResult] = st.session_state.setdefault("lego_results", {})
