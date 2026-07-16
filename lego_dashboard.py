@@ -46,12 +46,18 @@ from manual_tools import (
     ConnectionSettings,
     WebullManualClient,
     build_market_order_payload,
-    format_order_quantity,
     generate_client_order_id,
 )
 from lego_uat import (
+    account_fingerprint,
     build_audit_event,
     redact_payload,
+)
+from lego_orders import (
+    PRODUCTION_ENVIRONMENT,
+    evaluate_submit_gate,
+    order_confirmation_phrase,
+    summarize_order_result,
 )
 from webull_lego_single_file import (
     WebullSettings,
@@ -176,7 +182,17 @@ def clear_connection_state(*, clear_widgets: bool = True) -> None:
         "lego_audit_events",
     ):
         st.session_state.pop(key, None)
+    # Any connection change must void a stale Preview so a live Submit can never
+    # reuse a payload that was validated under a different account/environment.
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("order_") and str(key).endswith(
+            ("_preview_state", "_output")
+        ):
+            st.session_state.pop(key, None)
     if clear_widgets:
+        for key in list(st.session_state.keys()):
+            if str(key).startswith("order_"):
+                st.session_state.pop(key, None)
         for key in (
             "lego_account_id",
             "lego_app_key",
@@ -193,12 +209,6 @@ def _download_json(value: Any) -> bytes:
     return json.dumps(
         redact_payload(value), ensure_ascii=False, indent=2, default=str
     ).encode("utf-8")
-
-
-def _latest_stage_row(stage_result: StageResult) -> pd.Series:
-    if stage_result.frame.empty:
-        return pd.Series(dtype=object)
-    return stage_result.frame.iloc[-1]
 
 
 def _real_webull_settings(settings: ConnectionSettings) -> WebullSettings:
@@ -279,263 +289,352 @@ def run_all_pipeline_stages(
     return results
 
 
-def render_uat_panel(stage_result: StageResult) -> None:
+def _order_defaults_from_row(stage_result: StageResult | None) -> tuple[str, str, float]:
+    """Prefill order inputs from the latest chain row — convenience only."""
+
+    default_symbol = str(st.session_state.get("lego_symbol", "") or "")
+    default_side = "BUY"
+    default_quantity = 1.0
+    if stage_result is not None and not stage_result.frame.empty:
+        latest = stage_result.frame.iloc[-1]
+        symbol = str(latest.get("สินทรัพย์", "") or "").strip()
+        if symbol:
+            default_symbol = symbol
+        side = str(latest.get("ฝั่ง", "") or "").strip().upper()
+        if side in ("BUY", "SELL"):
+            default_side = side
+        raw_quantity = pd.to_numeric(
+            pd.Series([latest.get("จำนวนสั่ง (หุ้น)")]), errors="coerce"
+        ).iloc[0]
+        if pd.notna(raw_quantity) and raw_quantity > 0:
+            default_quantity = float(raw_quantity)
+    return default_symbol.upper(), default_side, default_quantity
+
+
+def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None, str]:
+    """Return a (message, streamlit-level) badge that never mislabels a fill."""
+
+    status = summary_view.get("status")
+    category = summary_view.get("status_category")
+    order_id = summary_view.get("order_id")
+    label = status or category
+    if action == "PREVIEW":
+        return ("Preview สำเร็จ — Webull ตรวจ payload แล้ว (ยังไม่ได้ส่งคำสั่ง)", "success")
+    if action == "CANCEL":
+        return (f"ส่งคำขอ Cancel แล้ว — สถานะจริง: {label}", "info")
+    if action == "SUBMIT":
+        if summary_view.get("is_filled"):
+            return (f"order_id={order_id} · FILLED", "success")
+        return (
+            f"ส่งคำสั่งแล้ว order_id={order_id} · สถานะจริง={label} — "
+            "ยังไม่ใช่ FILLED ห้ามนับเป็นเงินจริงจนกว่าจะยืนยัน fill",
+            "warning",
+        )
+    if action == "QUERY":
+        if summary_view.get("is_filled"):
+            return (f"order_id={order_id} · FILLED", "success")
+        if summary_view.get("is_terminal"):
+            return (f"order_id={order_id} · terminal={label}", "warning")
+        return (f"order_id={order_id} · pending/working={label} — ยังไม่ filled", "info")
+    return (None, "info")
+
+
+def _run_order_action(
+    *,
+    action: str,
+    settings: ConnectionSettings,
+    summary: dict[str, Any],
+    call: Callable[[], Any],
+    prefix: str,
+    store_preview: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Execute one real Webull order call, redact, badge, and audit it."""
+
+    started = time.perf_counter()
+    try:
+        result = call()
+        safe_result = redact_payload(result)
+        elapsed = (time.perf_counter() - started) * 1000
+        summary_view = summarize_order_result(safe_result)
+        if store_preview is not None:
+            st.session_state[f"{prefix}_preview_state"] = dict(store_preview)
+        badge, level = _order_badge(action, summary_view)
+        st.session_state[f"{prefix}_output"] = {
+            "action": action,
+            "result": {"summary": summary_view, "raw": safe_result},
+            "badge": badge,
+            "level": level,
+        }
+        warning = record_audit(
+            make_audit_event(
+                action=action,
+                settings=settings,
+                request_summary=summary,
+                result=safe_result,
+                elapsed_ms=elapsed,
+            )
+        )
+        if warning:
+            st.warning(warning)
+        return summary_view
+    except Exception as exc:
+        elapsed = (time.perf_counter() - started) * 1000
+        warning = record_audit(
+            make_audit_event(
+                action=action,
+                settings=settings,
+                request_summary=summary,
+                result=None,
+                elapsed_ms=elapsed,
+                error=exc,
+            )
+        )
+        if warning:
+            st.warning(warning)
+        st.error(f"{exc.__class__.__name__}: {exc}")
+        return None
+
+
+def render_order_panel(
+    tab_key: str,
+    config: LegoDashboardConfig,
+    *,
+    default_symbol: str = "",
+    default_side: str = "BUY",
+    default_quantity: float = 1.0,
+) -> None:
+    """Guarded real-order control shared by every tab: Preview → Place → Query.
+
+    UAT hits the real UAT endpoint.  Production is fail-closed behind a safety
+    switch, a retyped confirmation phrase (which re-states account/symbol/side/
+    quantity), and a Preview whose payload must match the one being placed.
+    """
+
     st.divider()
-    st.subheader("UAT order actions — แยกจาก LEGO Run")
-    st.caption(
-        "ค่าเริ่มต้นมาจากแถวล่าสุดเพื่อช่วยกรอกเท่านั้น กรุณาตรวจทุกค่าใหม่ "
-        "Preview, Submit และ Cancel จะทำงานเฉพาะ Test/UAT"
-    )
+    st.subheader("🔴 ส่งคำสั่งซื้อขายจริงผ่าน Webull Order API")
     settings: ConnectionSettings | None = st.session_state.get("lego_settings")
     if settings is None:
-        st.info("ต้องผ่าน Tab 0 ก่อนใช้ UAT actions")
+        st.info(
+            "ต้องยืนยัน Webull ที่ Tab 0 (Connect & Load) ก่อนจึงจะ Preview/Submit order ได้"
+        )
         return
 
-    latest = _latest_stage_row(stage_result)
-    default_symbol = str(latest.get("สินทรัพย์", "AAPL") or "AAPL")
-    default_side = str(latest.get("ฝั่ง", "BUY") or "BUY")
-    if default_side not in ("BUY", "SELL"):
-        default_side = "BUY"
-    raw_quantity = pd.to_numeric(
-        pd.Series([latest.get("จำนวนสั่ง (หุ้น)")]), errors="coerce"
-    ).iloc[0]
-    default_quantity = float(raw_quantity) if pd.notna(raw_quantity) and raw_quantity > 0 else 1.0
-
-    left, middle, right = st.columns(3)
-    with left:
-        symbol = st.text_input(
-            "UAT symbol", value=default_symbol, key="lego_uat_symbol"
-        ).strip().upper()
-    with middle:
-        side = st.selectbox(
-            "UAT side",
-            ["BUY", "SELL"],
-            index=0 if default_side == "BUY" else 1,
-            key="lego_uat_side",
+    is_production = settings.environment == PRODUCTION_ENVIRONMENT
+    st.caption(
+        f"Environment: {settings.environment} · {settings.endpoint} · "
+        f"Account #{account_fingerprint(settings.account_id)} · "
+        "ค่าเริ่มต้นมาจากแถวล่าสุดเพื่อช่วยกรอกเท่านั้น — ตรวจทุกค่าใหม่ก่อนยิง"
+    )
+    if is_production:
+        st.error(
+            "โหมด Production — คำสั่งนี้เป็นเงินจริงและย้อนกลับไม่ได้ ต้องเปิด safety switch "
+            "และพิมพ์ confirmation phrase ให้ตรงก่อน Submit"
         )
-    with right:
+    else:
+        st.warning("โหมด Test (UAT) — ยิง UAT endpoint จริง ไม่กระทบเงินจริง")
+
+    prefix = f"order_{tab_key}"
+    columns = st.columns(3)
+    with columns[0]:
+        symbol = (
+            st.text_input("Symbol", value=default_symbol, key=f"{prefix}_symbol")
+            .strip()
+            .upper()
+        )
+    with columns[1]:
+        side = st.selectbox(
+            "Side",
+            ["BUY", "SELL"],
+            index=0 if default_side != "SELL" else 1,
+            key=f"{prefix}_side",
+        )
+    with columns[2]:
         quantity = st.number_input(
-            "UAT quantity",
+            "Quantity (หุ้น)",
             min_value=0.00001,
-            value=default_quantity,
+            value=float(default_quantity),
             step=1.0,
             format="%.5f",
-            key="lego_uat_quantity",
+            key=f"{prefix}_quantity",
         )
 
     trading_session = st.selectbox(
         "Trading session",
         ["CORE", "PRE", "AFTER", "OVERNIGHT"],
-        key="lego_uat_trading_session",
+        key=f"{prefix}_session",
     )
-    if "lego_uat_client_order_id" not in st.session_state:
-        st.session_state.lego_uat_client_order_id = generate_client_order_id(
-            "LEGO", symbol or "AAPL", side, quantity, time.time_ns()
+
+    coid_key = f"{prefix}_client_order_id"
+    if coid_key not in st.session_state:
+        st.session_state[coid_key] = generate_client_order_id(
+            "LEGO", symbol or "NA", side, tab_key, time.time_ns()
         )
-    client_order_id = st.text_input(
-        "Client Order ID", key="lego_uat_client_order_id"
-    ).strip()
+    coid_cols = st.columns([3, 1])
+    with coid_cols[0]:
+        client_order_id = st.text_input("Client Order ID", key=coid_key).strip()
+    with coid_cols[1]:
+        st.button(
+            "🔄 id ใหม่",
+            key=f"{prefix}_new_coid",
+            on_click=lambda: st.session_state.update(
+                {
+                    coid_key: generate_client_order_id(
+                        "LEGO", symbol or "NA", side, tab_key, time.time_ns()
+                    )
+                }
+            ),
+        )
 
     try:
         payload = build_market_order_payload(
-            symbol,
-            side,
-            float(quantity),
-            client_order_id,
-            trading_session,
+            symbol, side, float(quantity), client_order_id, trading_session
         )
         payload_hash = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        st.markdown("**Payload ที่ตรวจแล้ว**")
+        st.markdown("**Payload ที่ตรวจแล้ว (redacted)**")
         st.json(redact_payload(payload))
     except Exception as exc:
         payload = None
         payload_hash = ""
         st.error(f"{exc.__class__.__name__}: {exc}")
 
-    uat_only = settings.environment == "Test (UAT)"
-    if not uat_only:
-        st.error("Production เป็น read-only ใน LEGO app — mutation buttons ถูกปิด")
+    request_summary = {
+        "symbol": symbol,
+        "side": side,
+        "quantity": float(quantity),
+        "client_order_id": client_order_id,
+        "trading_session": trading_session,
+        "environment": settings.environment,
+    }
 
-    if st.button(
-        "Preview UAT order",
-        disabled=payload is None or not uat_only,
-        key="lego_uat_preview_button",
-    ):
-        started = time.perf_counter()
-        summary = {
-            "symbol": symbol,
-            "side": side,
-            "quantity": float(quantity),
-            "client_order_id": client_order_id,
-            "trading_session": trading_session,
-        }
-        try:
-            result = WebullManualClient(settings).preview_market_order(payload)
-            safe_result = redact_payload(result)
-            elapsed = (time.perf_counter() - started) * 1000
-            st.session_state.lego_uat_preview = {
-                "payload_hash": payload_hash,
-                "result": safe_result,
-            }
-            st.session_state.lego_uat_output = {
-                "action": "PREVIEW",
-                "result": safe_result,
-            }
-            warning = record_audit(
-                make_audit_event(
-                    action="PREVIEW",
-                    settings=settings,
-                    request_summary=summary,
-                    result=safe_result,
-                    elapsed_ms=elapsed,
-                )
-            )
-            if warning:
-                st.warning(warning)
-        except Exception as exc:
-            elapsed = (time.perf_counter() - started) * 1000
-            warning = record_audit(
-                make_audit_event(
-                    action="PREVIEW",
-                    settings=settings,
-                    request_summary=summary,
-                    result=None,
-                    elapsed_ms=elapsed,
-                    error=exc,
-                )
-            )
-            if warning:
-                st.warning(warning)
-            st.error(f"{exc.__class__.__name__}: {exc}")
-
-    preview = st.session_state.get("lego_uat_preview")
-    preview_matches = bool(preview and preview.get("payload_hash") == payload_hash)
-    phrase = f"PLACE TEST {side} {symbol} {format_order_quantity(float(quantity))}"
-    st.code(phrase, language=None)
-    confirmation = st.text_input(
-        "พิมพ์คำยืนยัน Submit ให้ตรง",
-        value="",
-        key="lego_submit_confirmation",
-    )
-    if st.button(
-        "Submit UAT order",
-        disabled=payload is None or not uat_only or not preview_matches,
-        type="primary",
-        key="lego_uat_submit_button",
-    ):
-        if confirmation.strip() != phrase:
-            st.error("คำยืนยัน Submit ไม่ตรง")
-        else:
-            started = time.perf_counter()
-            summary = {
-                "symbol": symbol,
-                "side": side,
-                "quantity": float(quantity),
-                "client_order_id": client_order_id,
-                "trading_session": trading_session,
-            }
-            try:
-                result = WebullManualClient(settings).place_market_order(payload)
-                safe_result = redact_payload(result)
-                elapsed = (time.perf_counter() - started) * 1000
-                st.session_state.lego_uat_output = {
-                    "action": "SUBMIT",
-                    "result": safe_result,
-                }
-                warning = record_audit(
-                    make_audit_event(
-                        action="SUBMIT",
-                        settings=settings,
-                        request_summary=summary,
-                        result=safe_result,
-                        elapsed_ms=elapsed,
-                    )
-                )
-                if warning:
-                    st.warning(warning)
-            except Exception as exc:
-                elapsed = (time.perf_counter() - started) * 1000
-                warning = record_audit(
-                    make_audit_event(
-                        action="SUBMIT",
-                        settings=settings,
-                        request_summary=summary,
-                        result=None,
-                        elapsed_ms=elapsed,
-                        error=exc,
-                    )
-                )
-                if warning:
-                    st.warning(warning)
-                st.error(f"{exc.__class__.__name__}: {exc}")
-
-    st.markdown("#### Cancel UAT order")
-    cancel_id = st.text_input("Client Order ID ที่จะ cancel", key="lego_cancel_order_id").strip()
-    cancel_phrase = f"CANCEL TEST {cancel_id}"
-    if cancel_id:
-        st.code(cancel_phrase, language=None)
-    cancel_confirmation = st.text_input(
-        "พิมพ์คำยืนยัน Cancel ให้ตรง",
-        value="",
-        key="lego_cancel_confirmation",
-    )
-    if st.button(
-        "Cancel UAT order",
-        disabled=not uat_only or not cancel_id,
-        key="lego_uat_cancel_button",
-    ):
-        if cancel_confirmation.strip() != cancel_phrase:
-            st.error("คำยืนยัน Cancel ไม่ตรง")
-        else:
-            started = time.perf_counter()
-            summary = {"client_order_id": cancel_id}
-            try:
-                result = WebullManualClient(settings).cancel_order(cancel_id)
-                safe_result = redact_payload(result)
-                elapsed = (time.perf_counter() - started) * 1000
-                st.session_state.lego_uat_output = {
-                    "action": "CANCEL",
-                    "result": safe_result,
-                }
-                warning = record_audit(
-                    make_audit_event(
-                        action="CANCEL",
-                        settings=settings,
-                        request_summary=summary,
-                        result=safe_result,
-                        elapsed_ms=elapsed,
-                    )
-                )
-                if warning:
-                    st.warning(warning)
-            except Exception as exc:
-                elapsed = (time.perf_counter() - started) * 1000
-                warning = record_audit(
-                    make_audit_event(
-                        action="CANCEL",
-                        settings=settings,
-                        request_summary=summary,
-                        result=None,
-                        elapsed_ms=elapsed,
-                        error=exc,
-                    )
-                )
-                if warning:
-                    st.warning(warning)
-                st.error(f"{exc.__class__.__name__}: {exc}")
-
-    if "lego_uat_output" in st.session_state:
-        safe_output = st.session_state.lego_uat_output
-        st.markdown("#### UAT output (redacted)")
-        st.json(safe_output)
-        st.download_button(
-            "Download UAT output JSON",
-            data=_download_json(safe_output),
-            file_name="webull_lego_uat_output.json",
-            mime="application/json",
+    if st.button("Preview order", disabled=payload is None, key=f"{prefix}_preview"):
+        _run_order_action(
+            action="PREVIEW",
+            settings=settings,
+            summary=request_summary,
+            call=lambda: WebullManualClient(settings).preview_market_order(payload),
+            store_preview={"payload_hash": payload_hash},
+            prefix=prefix,
         )
+
+    preview = st.session_state.get(f"{prefix}_preview_state")
+    preview_matches = bool(
+        preview and preview.get("payload_hash") == payload_hash and payload is not None
+    )
+
+    safety_switch = True
+    if is_production:
+        safety_switch = st.checkbox(
+            "เปิด Production safety switch — ฉันยืนยันว่าจะยิงคำสั่งเงินจริง",
+            value=False,
+            key=f"{prefix}_safety",
+        )
+
+    phrase = ""
+    confirmation = ""
+    confirmation_ok = False
+    if payload is not None:
+        phrase = order_confirmation_phrase(
+            settings.environment, settings.account_id, side, symbol, float(quantity)
+        )
+        st.markdown("**พิมพ์ confirmation phrase ให้ตรงเป๊ะก่อน Submit**")
+        st.code(phrase, language=None)
+        confirmation = st.text_input(
+            "Confirmation phrase", value="", key=f"{prefix}_confirm"
+        )
+        confirmation_ok = confirmation.strip() == phrase
+
+    gate = evaluate_submit_gate(
+        environment=settings.environment,
+        payload_valid=payload is not None,
+        preview_matches=preview_matches,
+        confirmation_ok=confirmation_ok,
+        safety_switch=safety_switch,
+    )
+    if not gate.allowed:
+        st.caption("ยังส่งไม่ได้: " + " · ".join(gate.reasons))
+
+    if st.button(
+        "🚀 Submit order (REAL)",
+        disabled=not gate.allowed,
+        type="primary",
+        key=f"{prefix}_submit",
+    ):
+        if not gate.allowed or confirmation.strip() != phrase:
+            st.error("การยืนยันไม่ครบ — ยกเลิกการ Submit")
+        else:
+            _run_order_action(
+                action="SUBMIT",
+                settings=settings,
+                summary=request_summary,
+                call=lambda: WebullManualClient(settings).place_market_order(payload),
+                prefix=prefix,
+            )
+            # Force a fresh Preview + confirmation before any second submit.
+            st.session_state.pop(f"{prefix}_preview_state", None)
+
+    st.markdown("#### ตรวจสถานะคำสั่งจริง (Query)")
+    query_id = st.text_input(
+        "Client Order ID ที่จะ query", value=client_order_id, key=f"{prefix}_query_id"
+    ).strip()
+    if st.button("Query order status", disabled=not query_id, key=f"{prefix}_query"):
+        _run_order_action(
+            action="QUERY",
+            settings=settings,
+            summary={"client_order_id": query_id},
+            call=lambda: WebullManualClient(settings).get_order_detail(query_id),
+            prefix=prefix,
+        )
+
+    with st.expander("ยกเลิกคำสั่ง (Cancel)"):
+        cancel_id = st.text_input(
+            "Client Order ID ที่จะ cancel", key=f"{prefix}_cancel_id"
+        ).strip()
+        cancel_phrase = (
+            f"CANCEL {'PROD' if is_production else 'UAT'} {cancel_id}"
+            if cancel_id
+            else ""
+        )
+        if cancel_id:
+            st.code(cancel_phrase, language=None)
+        cancel_confirm = st.text_input(
+            "พิมพ์คำยืนยัน Cancel", value="", key=f"{prefix}_cancel_confirm"
+        )
+        if st.button("Cancel order", disabled=not cancel_id, key=f"{prefix}_cancel"):
+            if cancel_confirm.strip() != cancel_phrase:
+                st.error("คำยืนยัน Cancel ไม่ตรง")
+            else:
+                _run_order_action(
+                    action="CANCEL",
+                    settings=settings,
+                    summary={"client_order_id": cancel_id},
+                    call=lambda: WebullManualClient(settings).cancel_order(cancel_id),
+                    prefix=prefix,
+                )
+
+    output = st.session_state.get(f"{prefix}_output")
+    if output:
+        st.markdown("#### ผลลัพธ์ล่าสุด (redacted)")
+        badge = output.get("badge")
+        if badge:
+            getattr(st, output.get("level", "info"))(badge)
+        st.json(output.get("result"))
+        st.download_button(
+            "Download order output JSON",
+            data=_download_json(output.get("result")),
+            file_name=f"webull_lego_order_{tab_key}.json",
+            mime="application/json",
+            key=f"{prefix}_download",
+        )
+
+    st.markdown("#### Learning Guide — order lifecycle")
+    st.write(
+        "ลำดับที่ปลอดภัย: (1) ตรวจ payload → (2) Preview ให้ Webull ตรวจก่อน → "
+        "(3) พิมพ์ confirmation phrase + (Production) เปิด safety switch → "
+        "(4) Submit ยิง place_order จริง → (5) Query อ่านสถานะจริง · "
+        "สถานะ SUBMITTED/PENDING ไม่ใช่ FILLED และจะไม่ถูกนับเป็นเงินจริงจนกว่าจะมีหลักฐาน fill"
+    )
 
 
 def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
@@ -610,15 +709,21 @@ def render_stage_tab(stage, config: LegoDashboardConfig) -> None:
                 st.write(f"• {diagnostic}")
             st.json(result.provenance)
 
-        if stage.number == 11:
-            render_uat_panel(result)
-
     with st.expander("คู่มือเรียนรู้ LEGO Block", expanded=result is not None):
         st.write(stage.learning_guide)
         st.caption(
             "หลักคิด: input จากบล็อกก่อนหน้า → ฟังก์ชันบริสุทธิ์ → validation → "
             "output หนึ่งคอลัมน์ → ส่ง accumulated dataframe ต่อ"
         )
+
+    default_symbol, default_side, default_quantity = _order_defaults_from_row(result)
+    render_order_panel(
+        f"stage{stage.number}",
+        config,
+        default_symbol=default_symbol,
+        default_side=default_side,
+        default_quantity=default_quantity,
+    )
 
 
 def render_auth_tab(config: LegoDashboardConfig) -> None:
@@ -636,25 +741,25 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
     )
     st.code(WEBULL_ENDPOINTS[environment], language=None)
     account_id = st.text_input(
-        "Account ID", value="1251161573554425856", key="lego_account_id", autocomplete="off"
+        "Account ID", value="", key="lego_account_id", autocomplete="off"
     )
     app_key = st.text_input(
         "App Key",
-        value="c12c25c93f98169ad56f5148e4edfd16",
+        value="",
         type="password",
         key="lego_app_key",
         autocomplete="off",
     )
     app_secret = st.text_input(
         "App Secret",
-        value="f3ac0da97d2085ad4ce14b961cbd8824",
+        value="",
         type="password",
         key="lego_app_secret",
         autocomplete="off",
     )
     symbol = st.text_input(
         "Symbol สำหรับ Webull quote (optional)",
-        value="EOSE",
+        value="",
         key="lego_symbol_input",
         help="ถ้าเว้นว่าง จะใช้ symbol แรกจาก Firestore trade log",
     ).strip().upper()
@@ -782,6 +887,15 @@ def render_auth_tab(config: LegoDashboardConfig) -> None:
             key="lego_download_all_in_auth",
         )
 
+    default_symbol, default_side, default_quantity = _order_defaults_from_row(None)
+    render_order_panel(
+        "auth",
+        config,
+        default_symbol=default_symbol,
+        default_side=default_side,
+        default_quantity=default_quantity,
+    )
+
 
 def render_final_tab(config: LegoDashboardConfig) -> None:
     st.subheader("Step 18 — Final DataFrame")
@@ -790,6 +904,14 @@ def render_final_tab(config: LegoDashboardConfig) -> None:
         completed = len([stage for stage in range(1, 18) if stage in results])
         st.warning(
             f"Final ยังล็อกอยู่ — สำเร็จ {completed}/17 steps; ต้อง Run Step 1 ถึง 17 ตามลำดับ"
+        )
+        symbol0, side0, qty0 = _order_defaults_from_row(None)
+        render_order_panel(
+            "final",
+            config,
+            default_symbol=symbol0,
+            default_side=side0,
+            default_quantity=qty0,
         )
         return
 
@@ -837,6 +959,15 @@ def render_final_tab(config: LegoDashboardConfig) -> None:
             mime="application/json",
         )
 
+    symbol0, side0, qty0 = _order_defaults_from_row(results.get(17))
+    render_order_panel(
+        "final",
+        config,
+        default_symbol=symbol0,
+        default_side=side0,
+        default_quantity=qty0,
+    )
+
 
 def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
     """Real read-only Webull/Firestore Step 0 followed by Steps 1→18."""
@@ -853,7 +984,7 @@ def render_all_in_sidebar(config: LegoDashboardConfig) -> None:
         else:
             st.info(
                 f"{settings.environment} · {settings.endpoint} · "
-                f"Production={'read-only' if settings.is_production else 'N/A'}"
+                "All-in loop = read-only reads (ไม่ส่ง order · ใช้ order panel ในแต่ละแท็บ)"
             )
 
         status = st.session_state.get("lego_all_in_status")
@@ -963,10 +1094,12 @@ except Exception as config_error:
 st.title("🧱 Webull LEGO Chain")
 st.caption(
     "Authenticated hybrid data → 17 manual LEGO blocks → Final DataFrame · "
-    "ทุก Run เป็น read-only ยกเว้นปุ่ม UAT ที่แยกและยืนยันชัดเจน"
+    "ทุกแท็บ 0–18 มี order panel ยิง Webull Order API จริง (Preview → Place → Query) · "
+    "การ Run/คำนวณเป็น read-only การส่ง order ต้องกด Submit เองเสมอ"
 )
 st.warning(
-    "Deploy แอปนี้เป็น Private single-user ก่อนใส่ Firebase service account ใน Streamlit secrets"
+    "Deploy แอปนี้เป็น Private single-user · Production ส่ง order เงินจริงได้เฉพาะเมื่อเปิด "
+    "safety switch + พิมพ์ confirmation phrase — ตรวจ account/symbol/side/quantity ทุกครั้ง"
 )
 
 tab_labels = [
