@@ -151,17 +151,34 @@ def make_audit_event(
 
 
 def record_audit(event: dict[str, Any]) -> str | None:
-    """Write sanitized audit best-effort and always keep a session download copy."""
+    """Write sanitized audit best-effort and always keep a session download copy.
+
+    The session copy (``lego_audit_events``) is the source of truth and is always
+    retained for download.  Persisting to Firestore is a bonus: if the service
+    account lacks write permission on the audit collection it fails **once**, we
+    fall back to session-only for the rest of the session, and — crucially — the
+    order API result is never affected or hidden.
+    """
 
     st.session_state.setdefault("lego_audit_events", []).append(event)
+    # Session-only audit is a valid, non-error state (kept + downloadable).
+    if st.session_state.get("lego_audit_firestore_off"):
+        return None
     db = st.session_state.get("lego_db")
     config = st.session_state.get("lego_config")
     if db is None or config is None:
-        return "ไม่มี Firestore client สำหรับบันทึก audit"
+        return None
     try:
         db.collection(config.audit_collection).document(event["event_id"]).set(event)
     except Exception as exc:  # audit failure must not hide an API result
-        return f"เขียน audit ไม่สำเร็จ: {exc.__class__.__name__}: {exc}"
+        # Stop retrying this session so the notice appears once, not per action.
+        st.session_state["lego_audit_firestore_off"] = True
+        return (
+            "บันทึก audit ลง Firestore ไม่ได้ — order **ไม่ได้รับผลกระทบ** (ดูผลด้านบน) และ "
+            "audit ถูกเก็บใน session แล้ว ดาวน์โหลดได้ที่ Tab 18. เหตุผล: "
+            f"{exc.__class__.__name__}: {exc} · แก้โดยให้ service account เขียน "
+            f"collection `{config.audit_collection}` ได้ หรือปรับ Firestore security rules"
+        )
     return None
 
 
@@ -180,6 +197,7 @@ def clear_connection_state(*, clear_widgets: bool = True) -> None:
         "lego_uat_preview",
         "lego_uat_output",
         "lego_audit_events",
+        "lego_audit_firestore_off",
     ):
         st.session_state.pop(key, None)
     # Any connection change must void a stale Preview so a live Submit can never

@@ -278,6 +278,52 @@ def test_all_in_order_panel_is_hidden_until_the_chain_is_complete():
     assert not any(button.key == "order_allin_preview" for button in app.button)
 
 
+class _AuditDeniedDB:
+    """Firestore stand-in whose writes fail like a 403 PermissionDenied."""
+
+    def collection(self, name):
+        return self
+
+    def document(self, doc_id):
+        return self
+
+    def set(self, event):
+        raise RuntimeError("403 Missing or insufficient permissions.")
+
+
+def test_order_survives_a_denied_firestore_audit_write(monkeypatch):
+    import manual_tools
+
+    monkeypatch.setattr(manual_tools, "WebullManualClient", _FakeClient)
+
+    import types
+
+    app = _authenticated_app("Test (UAT)")
+    app.session_state["lego_db"] = _AuditDeniedDB()
+    app.session_state["lego_config"] = types.SimpleNamespace(
+        audit_collection="webull_lego_uat_audit"
+    )
+    app.run(timeout=30)
+
+    next(b for b in app.button if b.key == "order_auth_preview").click().run(timeout=30)
+
+    # The order action still produced its result despite the audit-write failure.
+    assert not app.exception
+    assert app.session_state["order_auth_output"]["action"] == "PREVIEW"
+    # The audit event is retained in the session for download.
+    assert len(app.session_state["lego_audit_events"]) == 1
+    # Firestore persistence is disabled for the rest of the session (warn once).
+    assert app.session_state["lego_audit_firestore_off"] is True
+    # The notice makes clear the order was unaffected.
+    assert any("ไม่ได้รับผลกระทบ" in warning.value for warning in app.warning)
+
+    # A second action does not raise a second Firestore warning.
+    next(b for b in app.button if b.key == "order_auth_preview").click().run(timeout=30)
+    assert not any(
+        "บันทึก audit ลง Firestore ไม่ได้" in warning.value for warning in app.warning
+    )
+
+
 def test_sidebar_exposes_real_read_only_all_in_single_file():
     source = Path("lego_dashboard.py").read_text(encoding="utf-8")
     single_file = Path("webull_lego_single_file.py").read_text(encoding="utf-8")
