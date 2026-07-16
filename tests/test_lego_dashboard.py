@@ -117,6 +117,23 @@ def test_hot_reload_recovers_stale_pipeline_contract(monkeypatch):
     assert any(item.value.startswith("**Goal:**") for item in app.markdown)
 
 
+def test_hot_reload_tolerates_legacy_step_zero_summary():
+    app = AppTest.from_file("lego_dashboard.py")
+    app.session_state["lego_auth_summary"] = {
+        "run_id": "legacy-run-id",
+        "anchor_version": 7,
+    }
+    app.run(timeout=30)
+
+    assert not app.exception
+    metric_values = {metric.label: metric.value for metric in app.metric}
+    assert metric_values["Snapshot rows"] == "0"
+    assert metric_values["Old trade-log reads"] == "0"
+    assert metric_values["Anchor version"] == "7"
+    assert metric_values["Run ID"] == "legacy-run"
+    assert any("Connect ใหม่" in item.value for item in app.warning)
+
+
 def test_stages_are_locked_before_step_zero():
     app = AppTest.from_file("lego_dashboard.py").run(timeout=30)
     run_buttons = [
