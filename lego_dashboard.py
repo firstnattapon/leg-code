@@ -10,7 +10,6 @@ committed row, UAT only; Production is read-only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 import time
@@ -60,13 +59,13 @@ from manual_tools import (
     ConnectionSettings,
     WebullManualClient,
     build_market_order_payload,
+    first_value,
     generate_client_order_id,
+    iter_dicts,
 )
 from lego_uat import build_audit_event, redact_payload
 from lego_orders import (
     PRODUCTION_ENVIRONMENT,
-    evaluate_submit_gate,
-    order_confirmation_phrase,
     summarize_order_result,
 )
 
@@ -189,7 +188,10 @@ def connect_and_prepare_run(
         snapshot.environment, snapshot.account_fingerprint, snapshot.symbol, params
     )
     anchor = anchor_from_state(read_anchor_state(store, chain_key))
-    run_id = compute_run_id(chain_key, anchor, snapshot)
+    # A per-preparation random nonce guarantees a unique run_id for each Connect
+    # & Load / Run ALL, even when price/holdings/anchor are unchanged.  The id is
+    # then held for this prepared run, so re-clicking Step 18 stays idempotent.
+    run_id = compute_run_id(chain_key, anchor, snapshot, nonce=uuid.uuid4().hex)
     ctx = RunContext(
         run_id=run_id, chain_key=chain_key, snapshot=snapshot, anchor=anchor, params=params
     )
@@ -282,6 +284,58 @@ def _record_order_audit(config: LegoDashboardConfig, event: dict[str, Any]) -> s
     return None
 
 
+def _business_message(result: Any) -> str | None:
+    """Pull a Webull business error/message (code/msg) out of any response shape."""
+
+    for node in iter_dicts(result):
+        message = first_value(
+            node, "msg", "message", "error_msg", "errorMsg", "detail", "description"
+        )
+        if message:
+            code = first_value(node, "code", "error_code", "errorCode")
+            return f"{str(code) + ': ' if code not in (None, '') else ''}{message}"
+    return None
+
+
+def _order_badge(
+    action: str, summary_view: dict[str, Any], raw: Any = None
+) -> tuple[str | None, str]:
+    """Human-readable status that never mislabels a fill and confirms delivery."""
+
+    status = summary_view.get("status")
+    category = summary_view.get("status_category")
+    order_id = summary_view.get("order_id")
+    label = status or category
+    if action == "PREVIEW":
+        message = _business_message(raw)
+        if message and not order_id:
+            return (f"Preview ตอบกลับ: {message} — ตรวจ payload/สิทธิ์เทรดก่อน Submit", "warning")
+        return ("Preview สำเร็จ — Webull ตรวจ payload แล้ว (ยังไม่ได้ส่งคำสั่ง)", "success")
+    if action == "SUBMIT":
+        if summary_view.get("is_filled"):
+            return (f"ส่งคำสั่งแล้ว · order_id={order_id} · FILLED", "success")
+        if order_id:
+            return (
+                f"✅ ส่งถึง Webull แล้ว · order_id={order_id} · สถานะ={label} — "
+                "SUBMITTED/PENDING ยังไม่ใช่ FILLED; UAT เป็น paper จึงไม่กระทบ holdings จริง",
+                "warning",
+            )
+        message = _business_message(raw)
+        return (
+            "⚠️ Webull ไม่ได้สร้าง order — "
+            + (f"เหตุผลจาก Webull: {message}" if message else "ดู raw ด้านล่าง")
+            + " · (market ปิด / ไม่มีสิทธิ์เทรด symbol นี้ / payload ไม่ผ่าน) กด Query ตรวจซ้ำ",
+            "error",
+        )
+    if action == "QUERY":
+        if summary_view.get("is_filled"):
+            return (f"order_id={order_id} · FILLED", "success")
+        if order_id:
+            return (f"พบคำสั่งที่ Webull · order_id={order_id} · สถานะ={label}", "info")
+        return ("Webull ไม่พบคำสั่งนี้ — order อาจยังไม่ถูกส่งสำเร็จ", "error")
+    return (None, "info")
+
+
 def _run_order_action(
     *,
     action: str,
@@ -300,9 +354,12 @@ def _run_order_action(
         summary_view = summarize_order_result(safe_result)
         if store_preview is not None:
             st.session_state[f"{prefix}_preview_state"] = dict(store_preview)
+        badge, level = _order_badge(action, summary_view, raw=safe_result)
         st.session_state[f"{prefix}_output"] = {
             "action": action,
             "result": {"summary": summary_view, "raw": safe_result},
+            "badge": badge,
+            "level": level,
         }
         warning = _record_order_audit(
             config,
@@ -339,7 +396,13 @@ def _run_order_action(
 
 
 def render_order_panel(config: LegoDashboardConfig) -> None:
-    """Preview/Submit for the committed final row — UAT only, Production locked."""
+    """Submit the committed final row's order — mirrors the proven Manual page.
+
+    Like ``pages/Manual.py``: an "armed" checkbox plus an exact confirmation
+    phrase gate a direct ``place_market_order``; Preview is optional and never
+    gates Submit.  Works in UAT (paper) and Production (real money).  The symbol,
+    side, and quantity are locked to the immutable final row.
+    """
 
     st.divider()
     st.markdown("### 🔴 ส่งคำสั่งจาก final row (หลัง Step 18)")
@@ -351,25 +414,29 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         st.info("ต้อง Connect & Load ที่ Tab 0 ก่อน")
         return
     if commit_result is None:
-        st.info("ต้องกด Step 18 (append final row) ให้สำเร็จก่อน จึงจะ Preview/Submit ได้")
+        st.info("ต้องกด Step 18 (append final row) ให้สำเร็จก่อน จึงจะส่ง order ได้")
         return
 
     decision = computed.decision
-    is_production = settings.environment == PRODUCTION_ENVIRONMENT
-    if is_production:
-        st.error("โหมด Production เป็น read-only — ปิดการส่ง order เงินจริงไว้เสมอ (fail-closed)")
-        return
     if decision.status not in (STATUS_READY_BUY, STATUS_READY_SELL):
         st.info(
-            f"final row เป็น {decision.status} — ไม่มี order ให้ส่ง (Preview/Submit เปิดเฉพาะ "
-            "READY_BUY / READY_SELL)"
+            f"final row เป็น {decision.status} — ไม่มี order ให้ส่ง (เปิดเฉพาะ READY_BUY / READY_SELL)"
         )
         return
 
     symbol = ctx.snapshot.symbol
     side = decision.side or "BUY"
     quantity = float(decision.quantity)
-    st.warning("โหมด Test (UAT) — ยิง UAT endpoint จริง payload มาจาก final row ที่บันทึกแล้ว")
+    is_production = settings.environment == PRODUCTION_ENVIRONMENT
+    environment_word = "PRODUCTION" if is_production else "UAT"
+    if is_production:
+        st.error(
+            "โหมด Production — คำสั่งนี้เป็น **เงินจริงและย้อนกลับไม่ได้** ตรวจ account/side/quantity ให้ชัวร์"
+        )
+    else:
+        st.warning(
+            "โหมด Test (UAT) — ยิง UAT endpoint จริง (paper) payload มาจาก final row ที่บันทึกแล้ว"
+        )
     st.caption(
         f"Account #{account_fingerprint(settings.account_id)} · {symbol} · {side} · {quantity} "
         f"· run_id {ctx.run_id[:12]}… · ค่าเหล่านี้ล็อกจาก final row แก้ไม่ได้"
@@ -387,14 +454,10 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         payload = build_market_order_payload(
             symbol, side, quantity, client_order_id, trading_session
         )
-        payload_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        st.markdown("**Payload ที่ตรวจแล้ว (redacted)**")
+        st.markdown("**Payload ที่จะส่ง (redacted)**")
         st.json(redact_payload(payload))
     except Exception as exc:
         payload = None
-        payload_hash = ""
         st.error(f"{exc.__class__.__name__}: {exc}")
 
     request_summary = {
@@ -407,46 +470,31 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         "run_id": ctx.run_id,
     }
 
-    if st.button("Preview order", disabled=payload is None, key=f"{prefix}_preview"):
+    # Preview is optional — like pages/Manual.py it never gates Submit.
+    if st.button("Preview order (optional)", disabled=payload is None, key=f"{prefix}_preview"):
         _run_order_action(
             action="PREVIEW",
             settings=settings,
             config=config,
             request_summary=request_summary,
             call=lambda: WebullManualClient(settings).preview_market_order(payload),
-            store_preview={"payload_hash": payload_hash},
             prefix=prefix,
         )
 
-    preview = st.session_state.get(f"{prefix}_preview_state")
-    preview_matches = bool(
-        preview and preview.get("payload_hash") == payload_hash and payload is not None
+    # Submit gate mirrors the working Manual page: armed checkbox + exact phrase.
+    confirmation_phrase = f"PLACE {environment_word} {side} {symbol} {quantity:g}"
+    st.error("ปุ่มด้านล่างเรียก place_order จริง (ส่งคำสั่งเข้าตลาด)")
+    armed = st.checkbox("ฉันเข้าใจว่านี่คือการส่งคำสั่งจริง", key=f"{prefix}_armed")
+    confirmation = st.text_input(
+        f"พิมพ์ให้ตรง: {confirmation_phrase}", value="", key=f"{prefix}_confirm"
     )
-
-    phrase = ""
-    confirmation_ok = False
-    if payload is not None:
-        phrase = order_confirmation_phrase(
-            settings.environment, settings.account_id, side, symbol, quantity
-        )
-        st.markdown("**พิมพ์ confirmation phrase ให้ตรงเป๊ะก่อน Submit**")
-        st.code(phrase, language=None)
-        confirmation = st.text_input("Confirmation phrase", value="", key=f"{prefix}_confirm")
-        confirmation_ok = confirmation.strip() == phrase
-
-    gate = evaluate_submit_gate(
-        environment=settings.environment,
-        payload_valid=payload is not None,
-        preview_matches=preview_matches,
-        confirmation_ok=confirmation_ok,
-        safety_switch=True,  # UAT has no production safety switch
-    )
-    if not gate.allowed:
-        st.caption("ยังส่งไม่ได้: " + " · ".join(gate.reasons))
+    can_submit = armed and confirmation.strip() == confirmation_phrase and payload is not None
+    if not can_submit:
+        st.caption("ต้องติ๊กยืนยัน + พิมพ์ phrase ให้ตรงก่อน จึงจะกด Submit ได้ (ไม่ต้อง Preview ก่อนก็ได้)")
 
     if st.button(
-        "🚀 Submit order (UAT)",
-        disabled=not gate.allowed,
+        f"🚀 Submit to {environment_word}",
+        disabled=not can_submit,
         type="primary",
         key=f"{prefix}_submit",
     ):
@@ -458,10 +506,27 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
             call=lambda: WebullManualClient(settings).place_market_order(payload),
             prefix=prefix,
         )
-        st.session_state.pop(f"{prefix}_preview_state", None)
+
+    st.markdown("#### ตรวจว่าคำสั่งถึง Webull จริง (Query)")
+    st.caption(
+        "UAT เป็น paper trading — holdings จริงไม่ขยับ และ draft row ใช้ snapshot ตอน Step 0 "
+        "(ต้อง Connect ใหม่เพื่อเห็น holdings อัปเดต) · ใช้ Query เพื่อยืนยันว่า Webull รับ order แล้ว"
+    )
+    if st.button("Query order status", key=f"{prefix}_query"):
+        _run_order_action(
+            action="QUERY",
+            settings=settings,
+            config=config,
+            request_summary={"client_order_id": client_order_id},
+            call=lambda: WebullManualClient(settings).get_order_detail(client_order_id),
+            prefix=prefix,
+        )
 
     output = st.session_state.get(f"{prefix}_output")
     if output:
+        badge = output.get("badge")
+        if badge:
+            getattr(st, output.get("level", "info"))(badge)
         st.markdown("#### ผลลัพธ์ล่าสุด (redacted)")
         st.json(output.get("result"))
 

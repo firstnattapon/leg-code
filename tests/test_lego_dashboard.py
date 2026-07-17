@@ -171,7 +171,7 @@ def _seed_committed_session(app, *, environment, store, ctx, computed, config):
                                               "old_trade_log_reads": 0}
 
 
-def test_production_order_panel_is_locked(patched_step0):
+def test_production_order_panel_requires_arm_and_phrase(patched_step0):
     config = make_config()
     ctx, store, computed, _ = connect_and_prepare_run(
         make_settings("Production"), config, symbol="AAPL", dna_code="bypass:100"
@@ -180,6 +180,25 @@ def test_production_order_panel_is_locked(patched_step0):
     _seed_committed_session(app, environment="Production", store=store, ctx=ctx, computed=computed, config=config)
     app.run(timeout=30)
     assert not app.exception
-    assert any("read-only" in e.value for e in app.error)
-    # No UAT submit button is rendered in Production.
-    assert not any(b.label.startswith("🚀 Submit order") for b in app.button)
+    # Production is real money and clearly flagged.
+    assert any("เงินจริง" in e.value for e in app.error)
+    # A submit button exists but stays disabled until armed + confirmation phrase.
+    submit = next(b for b in app.button if b.label.startswith("🚀 Submit to"))
+    assert submit.disabled
+
+
+def test_uat_order_panel_exposes_preview_submit_query(patched_step0):
+    config = make_config()
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings("Test (UAT)"), config, symbol="AAPL", dna_code="bypass:100"
+    )
+    app = AppTest.from_file("lego_dashboard.py")
+    _seed_committed_session(app, environment="Test (UAT)", store=store, ctx=ctx, computed=computed, config=config)
+    app.run(timeout=30)
+    assert not app.exception
+    labels = [b.label for b in app.button]
+    assert any(label.startswith("Preview order") for label in labels)
+    assert "Query order status" in labels  # lets the user verify delivery to Webull
+    submit = next(b for b in app.button if b.label.startswith("🚀 Submit to"))
+    # Submit stays disabled until the armed checkbox + a matching phrase.
+    assert submit.disabled
