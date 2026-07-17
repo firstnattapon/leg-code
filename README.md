@@ -95,13 +95,15 @@ service account มีสิทธิ์เขียน `webull_lego_order_audit
    และเขียน `webull_lego_rows`/`webull_lego_state` ได้ (append Step 18)
 4. เปิดแอปและยืนยันว่า Environment เริ่มต้นเป็น `Test (UAT)`
 5. ทดสอบ Connect & Load, Run 1–17, Append final row (Step 18) และ download final row CSV/JSON
-6. Order panel อยู่ **หลัง Step 18** เท่านั้น: เปิดเฉพาะ UAT และเฉพาะ final row ที่เป็น
-   `READY_BUY`/`READY_SELL` — Production เป็น read-only แบบ fail-closed
+6. Order panel อยู่ **หลัง Step 18** เท่านั้น และเปิดเฉพาะ final row ที่เป็น
+   `READY_BUY`/`READY_SELL` — ใช้ได้ทั้ง UAT (paper) และ Production (เงินจริง)
 
-Order panel ใช้ payload จาก final row ที่บันทึกแล้ว (`client_order_id` เป็น deterministic
-จาก `run_id`) ต้อง Preview payload เดิมก่อน Submit และพิมพ์ confirmation phrase ให้ตรง
-สถานะ `SUBMITTED`/`PENDING` จะไม่ถูกนับเป็น `FILLED` และผลที่เขียนลง
-`webull_lego_order_audit` ถูก redact ไม่มี credentials/raw account response
+Order panel ทำงานตามแนวเดียวกับหน้า Manual (`pages/Manual.py`) ที่ยิง order จริงได้:
+payload มาจาก final row ที่บันทึกแล้ว (`client_order_id` เป็น deterministic จาก `run_id`),
+ต้องติ๊ก **armed checkbox + พิมพ์ confirmation phrase ให้ตรง** จึงกด Submit ได้ (Preview
+เป็น optional ไม่บังคับ) จากนั้นใช้ **Query** ยืนยันว่า Webull รับ order สถานะ
+`SUBMITTED`/`PENDING` จะไม่ถูกนับเป็น `FILLED` และผลที่เขียนลง `webull_lego_order_audit`
+ถูก redact ไม่มี credentials/raw account response · UAT เป็น paper (holdings จริงไม่ขยับ)
 
 หน้า Manual ใช้งานได้โดยไม่ต้องตั้งค่า Firestore ส่วนหน้า Dashboard ต้องมี
 `.streamlit/secrets.toml` ที่ประกอบด้วย `firebase_service_account`
@@ -119,8 +121,9 @@ result) ถูกแยกเก็บไว้ใน `webull_lego_order_audit` 
 - Account ID, App Key และ App Secret ต้องกรอกขณะใช้งานและไม่ถูกเขียนลงไฟล์ (อยู่ใน
   session เท่านั้น ไม่เขียนลง final row/audit/download/log)
 - ห้าม commit `.streamlit/secrets.toml`, `.env` หรือ credentials ใด ๆ
-- Order panel อยู่หลัง Step 18 และเปิดเฉพาะ **UAT** + final row ที่เป็น READY_BUY/READY_SELL
-  การส่งคำสั่งต้องกด Submit เองหลัง Preview เสมอ; **Production เป็น read-only** แบบ fail-closed
+- Order panel อยู่หลัง Step 18 และเปิดเฉพาะ final row ที่เป็น READY_BUY/READY_SELL (UAT/Production)
+  การส่งคำสั่งต้องติ๊ก armed checkbox + พิมพ์ confirmation phrase ให้ตรงแล้วกด Submit เอง
+  (Preview optional) · Production เป็นเงินจริง — ตรวจ account/side/quantity ทุกครั้ง
 - Credential ที่เคยส่งผ่านแชตหรือช่องทางสาธารณะควรถูก revoke/rotate
 
 ## Test

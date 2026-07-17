@@ -10,7 +10,6 @@ committed row, UAT only; Production is read-only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 import time
@@ -67,8 +66,6 @@ from manual_tools import (
 from lego_uat import build_audit_event, redact_payload
 from lego_orders import (
     PRODUCTION_ENVIRONMENT,
-    evaluate_submit_gate,
-    order_confirmation_phrase,
     summarize_order_result,
 )
 
@@ -399,7 +396,13 @@ def _run_order_action(
 
 
 def render_order_panel(config: LegoDashboardConfig) -> None:
-    """Preview/Submit for the committed final row — UAT only, Production locked."""
+    """Submit the committed final row's order — mirrors the proven Manual page.
+
+    Like ``pages/Manual.py``: an "armed" checkbox plus an exact confirmation
+    phrase gate a direct ``place_market_order``; Preview is optional and never
+    gates Submit.  Works in UAT (paper) and Production (real money).  The symbol,
+    side, and quantity are locked to the immutable final row.
+    """
 
     st.divider()
     st.markdown("### 🔴 ส่งคำสั่งจาก final row (หลัง Step 18)")
@@ -411,33 +414,32 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         st.info("ต้อง Connect & Load ที่ Tab 0 ก่อน")
         return
     if commit_result is None:
-        st.info("ต้องกด Step 18 (append final row) ให้สำเร็จก่อน จึงจะ Preview/Submit ได้")
+        st.info("ต้องกด Step 18 (append final row) ให้สำเร็จก่อน จึงจะส่ง order ได้")
         return
 
     decision = computed.decision
-    is_production = settings.environment == PRODUCTION_ENVIRONMENT
-    if is_production:
-        st.error("โหมด Production เป็น read-only — ปิดการส่ง order เงินจริงไว้เสมอ (fail-closed)")
-        return
     if decision.status not in (STATUS_READY_BUY, STATUS_READY_SELL):
         st.info(
-            f"final row เป็น {decision.status} — ไม่มี order ให้ส่ง (Preview/Submit เปิดเฉพาะ "
-            "READY_BUY / READY_SELL)"
+            f"final row เป็น {decision.status} — ไม่มี order ให้ส่ง (เปิดเฉพาะ READY_BUY / READY_SELL)"
         )
         return
 
     symbol = ctx.snapshot.symbol
     side = decision.side or "BUY"
     quantity = float(decision.quantity)
-    st.warning("โหมด Test (UAT) — ยิง UAT endpoint จริง payload มาจาก final row ที่บันทึกแล้ว")
+    is_production = settings.environment == PRODUCTION_ENVIRONMENT
+    environment_word = "PRODUCTION" if is_production else "UAT"
+    if is_production:
+        st.error(
+            "โหมด Production — คำสั่งนี้เป็น **เงินจริงและย้อนกลับไม่ได้** ตรวจ account/side/quantity ให้ชัวร์"
+        )
+    else:
+        st.warning(
+            "โหมด Test (UAT) — ยิง UAT endpoint จริง (paper) payload มาจาก final row ที่บันทึกแล้ว"
+        )
     st.caption(
         f"Account #{account_fingerprint(settings.account_id)} · {symbol} · {side} · {quantity} "
         f"· run_id {ctx.run_id[:12]}… · ค่าเหล่านี้ล็อกจาก final row แก้ไม่ได้"
-    )
-    st.info(
-        "ลำดับส่งคำสั่ง: (1) กด **Preview order** ให้ Webull ตรวจ payload → (2) พิมพ์ confirmation "
-        "phrase ให้ตรง → (3) กด **Submit order (UAT)** → (4) กด **Query** ยืนยันว่า Webull รับ order "
-        "(ปุ่ม Submit จะเปิดก็ต่อเมื่อ Preview แล้วและ phrase ตรง)"
     )
 
     prefix = f"order_{ctx.run_id[:8]}"
@@ -452,14 +454,10 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         payload = build_market_order_payload(
             symbol, side, quantity, client_order_id, trading_session
         )
-        payload_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        st.markdown("**Payload ที่ตรวจแล้ว (redacted)**")
+        st.markdown("**Payload ที่จะส่ง (redacted)**")
         st.json(redact_payload(payload))
     except Exception as exc:
         payload = None
-        payload_hash = ""
         st.error(f"{exc.__class__.__name__}: {exc}")
 
     request_summary = {
@@ -472,49 +470,31 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         "run_id": ctx.run_id,
     }
 
-    if st.button("Preview order", disabled=payload is None, key=f"{prefix}_preview"):
+    # Preview is optional — like pages/Manual.py it never gates Submit.
+    if st.button("Preview order (optional)", disabled=payload is None, key=f"{prefix}_preview"):
         _run_order_action(
             action="PREVIEW",
             settings=settings,
             config=config,
             request_summary=request_summary,
             call=lambda: WebullManualClient(settings).preview_market_order(payload),
-            store_preview={"payload_hash": payload_hash},
             prefix=prefix,
         )
 
-    preview = st.session_state.get(f"{prefix}_preview_state")
-    preview_matches = bool(
-        preview and preview.get("payload_hash") == payload_hash and payload is not None
+    # Submit gate mirrors the working Manual page: armed checkbox + exact phrase.
+    confirmation_phrase = f"PLACE {environment_word} {side} {symbol} {quantity:g}"
+    st.error("ปุ่มด้านล่างเรียก place_order จริง (ส่งคำสั่งเข้าตลาด)")
+    armed = st.checkbox("ฉันเข้าใจว่านี่คือการส่งคำสั่งจริง", key=f"{prefix}_armed")
+    confirmation = st.text_input(
+        f"พิมพ์ให้ตรง: {confirmation_phrase}", value="", key=f"{prefix}_confirm"
     )
-
-    phrase = ""
-    confirmation_ok = False
-    if payload is not None:
-        phrase = order_confirmation_phrase(
-            settings.environment, settings.account_id, side, symbol, quantity
-        )
-        st.markdown("**พิมพ์ confirmation phrase ให้ตรงเป๊ะก่อน Submit**")
-        st.code(phrase, language=None)
-        confirmation = st.text_input("Confirmation phrase", value="", key=f"{prefix}_confirm")
-        confirmation_ok = confirmation.strip() == phrase
-
-    gate = evaluate_submit_gate(
-        environment=settings.environment,
-        payload_valid=payload is not None,
-        preview_matches=preview_matches,
-        confirmation_ok=confirmation_ok,
-        safety_switch=True,  # UAT has no production safety switch
-    )
-    if not gate.allowed:
-        st.warning(
-            "ยังกด Submit ไม่ได้ (ปุ่มถูกปิด): " + " · ".join(gate.reasons)
-            + " — ต้องกด **Preview order** ก่อน แล้วพิมพ์ confirmation phrase ให้ตรง"
-        )
+    can_submit = armed and confirmation.strip() == confirmation_phrase and payload is not None
+    if not can_submit:
+        st.caption("ต้องติ๊กยืนยัน + พิมพ์ phrase ให้ตรงก่อน จึงจะกด Submit ได้ (ไม่ต้อง Preview ก่อนก็ได้)")
 
     if st.button(
-        "🚀 Submit order (UAT)",
-        disabled=not gate.allowed,
+        f"🚀 Submit to {environment_word}",
+        disabled=not can_submit,
         type="primary",
         key=f"{prefix}_submit",
     ):
@@ -526,7 +506,6 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
             call=lambda: WebullManualClient(settings).place_market_order(payload),
             prefix=prefix,
         )
-        st.session_state.pop(f"{prefix}_preview_state", None)
 
     st.markdown("#### ตรวจว่าคำสั่งถึง Webull จริง (Query)")
     st.caption(

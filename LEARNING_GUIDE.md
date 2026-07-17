@@ -164,14 +164,20 @@ Step 18 ทำ Firestore transaction เดียว:
 `run_id` เป็น deterministic จาก chain, anchor version และ snapshot ที่จับไว้ กด Step 18
 ซ้ำใน run เดียวจึงไม่เพิ่มเอกสาร (`N_after − N_before = 1` ต่อ successful run เท่านั้น)
 
-## Order panel — หลัง Step 18, UAT เท่านั้น
+## Order panel — หลัง Step 18 (แนวเดียวกับหน้า Manual)
 
-การส่ง order จริงอยู่ **หลัง Step 18** และแยกจากปุ่มคำนวณเสมอ:
+การส่ง order จริงอยู่ **หลัง Step 18** และแยกจากปุ่มคำนวณเสมอ ใช้ gate เดียวกับหน้า
+Manual (`pages/Manual.py`) ที่ยิง order จริงได้:
 
-- เปิดเฉพาะ **UAT** และเฉพาะ final row ที่เป็น `READY_BUY`/`READY_SELL`
-- **Production เป็น read-only** แบบ fail-closed (ไม่มีปุ่ม Submit)
+- เปิดเฉพาะ final row ที่เป็น `READY_BUY`/`READY_SELL` · ใช้ได้ทั้ง **UAT (paper)** และ
+  **Production (เงินจริง)**
+- gate = ติ๊ก **armed checkbox** + พิมพ์ **confirmation phrase** ให้ตรง
+  (`PLACE UAT/PRODUCTION SIDE SYMBOL QTY`) จึงกด Submit ได้ — **Preview เป็น optional**
+  ไม่บังคับ
 - payload มาจาก final row ที่บันทึกแล้ว (`client_order_id` deterministic จาก `run_id`)
-  ต้อง Preview payload เดิมก่อน แล้วพิมพ์ confirmation phrase ให้ตรงจึงกด Submit ได้
+- หลัง Submit ใช้ปุ่ม **Query** ยืนยันว่า Webull รับ order (badge จะโชว์ order_id/สถานะ หรือ
+  เหตุผลที่ order ไม่ถูกสร้าง เช่น market ปิด/ไม่มีสิทธิ์เทรด)
+- UAT เป็น paper — **holdings จริงไม่ขยับ** และ draft row ใช้ snapshot ตอน Step 0
 - ผลถูก redact เขียนลง `webull_lego_order_audit` แยกจากสถานะผลการคำนวณ; `SUBMITTED`/
   `PENDING` ไม่ถูกนับเป็น `FILLED`
 
@@ -184,4 +190,4 @@ Step 18 ทำ Firestore transaction เดียว:
 - Step 18 = validate + append transaction (idempotent, stale-anchor guard)
 - Manual Run = เปิดเผยทีละคอลัมน์ของ row เดียว
 - All-in = read → compute → append ในคลิกเดียว ให้ row เดียวกับ Manual
-- Order panel = หลัง Step 18, UAT + READY_BUY/READY_SELL เท่านั้น, Production read-only
+- Order panel = หลัง Step 18, READY_BUY/READY_SELL (UAT/Production), gate = armed + phrase (Preview optional)
