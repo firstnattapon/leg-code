@@ -10,7 +10,8 @@ description: Create a simple Thai flowchart and equation map for the Webull LEGO
 ## Workflow
 
 1. ตรวจ source ปัจจุบันเมื่ออยู่ใน repository โดยอ่านเฉพาะส่วนที่เกี่ยวข้อง:
-   - `lego_one_row.py` — pipeline สมการ Step 0–17 (`build_decision`, `compute_recurrence`, `compute_row`)
+   - `lego_one_row.py` — pipeline สมการ Step 0–17 (`dna_step_for`, `dna_signal_for`, `build_decision`, `compute_recurrence`, `compute_row`)
+   - `manual_tools.py` — `decode_dna` ที่แปลง `DNA_CODE` เป็นอาเรย์ gate 0/1
    - `lego_state.py` — Step 18 transaction ที่ append final row
    - `lego_orders.py` — เส้นทาง Preview/Submit ของ UAT
    - `lego_dashboard.py` — UI ที่เรียกใช้ pipeline
@@ -32,10 +33,15 @@ description: Create a simple Thai flowchart and equation map for the Webull LEGO
 
 ```mermaid
 flowchart TD
-    S["เริ่ม<br/>อ่าน Pₙ, holdings และ anchor (P₀, Pₙ₋₁, Aₙ₋₁)"] --> V["Vₙ = holdings × Pₙ"]
+    S["เริ่ม<br/>อ่าน Pₙ, holdings และ anchor (P₀, Pₙ₋₁, Aₙ₋₁)"] --> ST["Step 4 · นับ step<br/>DNA step = anchor.dna_step + 1 (แถวแรก = 0)"]
+    ST --> DE["Step 5 · decode DNA<br/>decode(DNA_CODE) → บิต 0/1; signal = dna[step]"]
+    DE --> GT{"gate signal = 1?"}
+    GT -- "0 · ปิด" --> PZ["PASS_DNA_ZERO<br/>quantity = 0"]
+    GT -- "1 · เปิด" --> V["Vₙ = holdings × Pₙ"]
     V --> G["gap = FIX_C − Vₙ"]
     G --> Q["Quantity = round(|gap| ÷ Pₙ, 5)"]
     Q --> R["Rₙ = FIX_C × ln(Pₙ ÷ P₀)"]
+    PZ --> R
     R --> DA["ΔAₙ = FIX_C × (Pₙ ÷ Pₙ₋₁ − 1)"]
     DA --> A["Aₙ = Aₙ₋₁ + ΔAₙ"]
     A --> E["Eₙ = Aₙ − Rₙ"]
@@ -45,8 +51,12 @@ flowchart TD
 หมายเหตุแผนภาพง่าย:
 
 - อ่านค่าเดียว: current snapshot (Pₙ, holdings) กับ anchor แถวเดียว (P₀, Pₙ₋₁, Aₙ₋₁) ไม่มี history หลายแถว
+- **นับ step (Step 4):** `dna_step = anchor.dna_step + 1`, chain ใหม่เริ่มที่ `0` และเก็บต่อเนื่องใน state ข้ามแถว
+- **decode DNA (Step 5):** `decode_dna(DNA_CODE)` → อาเรย์ `0/1` ความยาวคงที่ (`bypass:100` = `1` ครบ 100 ช่อง); `dna[0] = 1` เสมอ (แถวแรก gate เปิด)
+- **gate 0/1:** `signal = dna[step]` — `0` = ปิด → `PASS_DNA_ZERO` (quantity 0); `1` = เปิด → คิด gap ต่อ (BUY/SELL/PASS_THRESHOLD)
+- **DNA หมด:** `step ≥ len(dna)` → fail closed (`"DNA exhausted"`)
 - แถวแรก (ไม่มี anchor) ใช้ `P₀ = Pₙ` และ `R₀ = ΔA₀ = A₀ = E₀ = 0`
-- `gap` และ `Quantity` เป็นสาย decision; `Rₙ → ΔAₙ → Aₙ → Eₙ` เป็นสาย ledger recurrence
+- `gap` และ `Quantity` เป็นสาย decision; `Rₙ → ΔAₙ → Aₙ → Eₙ` เป็นสาย ledger recurrence ที่คิดทุกแถวไม่ว่า gate เปิดหรือปิด
 
 ## Canonical calculation path
 
@@ -85,6 +95,8 @@ flowchart TD
 
 | ค่า | สมการ/กฎ |
 |---|---|
+| DNA step (นับ step) | `anchor.dna_step + 1` (แถวแรก = `0`) |
+| DNA signal (gate) | `decode_dna(DNA_CODE)[dna_step]` ∈ `{0, 1}` |
 | มูลค่าพอร์ต `Vₙ` | `holdings × Pₙ` |
 | Target gap | `FIX_C − Vₙ` |
 | Quantity | `round(abs(gap) / Pₙ, 5)` |
@@ -96,6 +108,7 @@ flowchart TD
 เพิ่มหมายเหตุสั้น ๆ ว่า:
 
 - แถวแรกใช้ `P₀=Pₙ` และ `R₀=ΔA₀=A₀=E₀=0`
+- DNA เป็น gate ต่อ 1 step: `signal=0` บังคับ `PASS_DNA_ZERO`; `signal=1` จึงพิจารณา gap; `step` เกินความยาว DNA ต้อง fail closed
 - ข้อมูลไม่ครบ, ราคาไม่เป็นบวก หรือ quantity เป็นศูนย์ต้อง fail closed
 - Step 8 สร้าง decision เพียงครั้งเดียว และ Step 9–13 อ่านจาก decision เดียวกัน
 - การกด Step 18 ซ้ำด้วย `run_id` เดิมต้องไม่สร้างเอกสารซ้ำ
