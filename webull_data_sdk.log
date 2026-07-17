@@ -1,0 +1,30 @@
+139894783316096 2026-07-17 06:18:28,181 webull.core.client ERROR HttpError occurred. Host:th-api.uat.webullbroker.com SDK-Version:2.0.13 Request:{
+  "_version": "v2",
+  "_action_name": "/openapi/config",
+  "_protocol_type": "https",
+  "_accept_format": "JSON",
+  "_params": {},
+  "_method": "GET",
+  "_header": {
+    "x-version": "v2",
+    "Accept-Encoding": "gzip",
+    "x-app-key": "c12c25c93f98169ad56f5148e4edfd16",
+    "x-timestamp": "2026-07-17T06:18:27Z",
+    "x-signature-version": "1.0",
+    "x-signature-algorithm": "HMAC-SHA256",
+    "x-signature-nonce": "3ee87deb-7e95-5c0f-824d-38127c52ee24",
+    "x-signature": "aDpB8PoL+GN2yEjXYSOSWXV770Zd/O9pUAFBPWLb8i8=",
+    "User-Agent": "WebullApiSDK (Linux 6.18.5;x86_64) Python/3.11.15 Core/2.0.13 python-requests/2.33.1",
+    "x-webull-client-source": "sdk"
+  },
+  "_body_params": null,
+  "_uri_pattern": null,
+  "_uri_params": null,
+  "_content": null,
+  "_extra_user_agent": {},
+  "string_to_sign": "",
+  "_request_connect_timeout": null,
+  "_request_read_timeout": null,
+  "endpoint": "th-api.uat.webullbroker.com",
+  "_signer_spec": "<module 'webull.core.auth.algorithm.sha_hmac1' from '/usr/local/lib/python3.11/dist-packages/webull/core/auth/algorithm/sha_hmac1.py'>"
+} ClientException:SDK.HttpError HTTPSConnectionPool(host='th-api.uat.webullbroker.com', port=443): Max retries exceeded with url: /openapi/config (Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden')))

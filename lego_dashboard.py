@@ -60,7 +60,9 @@ from manual_tools import (
     ConnectionSettings,
     WebullManualClient,
     build_market_order_payload,
+    first_value,
     generate_client_order_id,
+    iter_dicts,
 )
 from lego_uat import build_audit_event, redact_payload
 from lego_orders import (
@@ -285,7 +287,22 @@ def _record_order_audit(config: LegoDashboardConfig, event: dict[str, Any]) -> s
     return None
 
 
-def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None, str]:
+def _business_message(result: Any) -> str | None:
+    """Pull a Webull business error/message (code/msg) out of any response shape."""
+
+    for node in iter_dicts(result):
+        message = first_value(
+            node, "msg", "message", "error_msg", "errorMsg", "detail", "description"
+        )
+        if message:
+            code = first_value(node, "code", "error_code", "errorCode")
+            return f"{str(code) + ': ' if code not in (None, '') else ''}{message}"
+    return None
+
+
+def _order_badge(
+    action: str, summary_view: dict[str, Any], raw: Any = None
+) -> tuple[str | None, str]:
     """Human-readable status that never mislabels a fill and confirms delivery."""
 
     status = summary_view.get("status")
@@ -293,6 +310,9 @@ def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None,
     order_id = summary_view.get("order_id")
     label = status or category
     if action == "PREVIEW":
+        message = _business_message(raw)
+        if message and not order_id:
+            return (f"Preview ตอบกลับ: {message} — ตรวจ payload/สิทธิ์เทรดก่อน Submit", "warning")
         return ("Preview สำเร็จ — Webull ตรวจ payload แล้ว (ยังไม่ได้ส่งคำสั่ง)", "success")
     if action == "SUBMIT":
         if summary_view.get("is_filled"):
@@ -303,8 +323,11 @@ def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None,
                 "SUBMITTED/PENDING ยังไม่ใช่ FILLED; UAT เป็น paper จึงไม่กระทบ holdings จริง",
                 "warning",
             )
+        message = _business_message(raw)
         return (
-            f"⚠️ Webull ตอบกลับแต่ไม่มี order_id · สถานะ={label} — ดู raw ด้านล่างและกด Query ตรวจซ้ำ",
+            "⚠️ Webull ไม่ได้สร้าง order — "
+            + (f"เหตุผลจาก Webull: {message}" if message else "ดู raw ด้านล่าง")
+            + " · (market ปิด / ไม่มีสิทธิ์เทรด symbol นี้ / payload ไม่ผ่าน) กด Query ตรวจซ้ำ",
             "error",
         )
     if action == "QUERY":
@@ -334,7 +357,7 @@ def _run_order_action(
         summary_view = summarize_order_result(safe_result)
         if store_preview is not None:
             st.session_state[f"{prefix}_preview_state"] = dict(store_preview)
-        badge, level = _order_badge(action, summary_view)
+        badge, level = _order_badge(action, summary_view, raw=safe_result)
         st.session_state[f"{prefix}_output"] = {
             "action": action,
             "result": {"summary": summary_view, "raw": safe_result},
