@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEGO สมการ — คู่มือต่อบล็อก</title>
+<style>
+  :root{
+    --paper:#FAF6EE; --surface:#FFFFFF; --surface-2:#FDFBF6;
+    --ink:#241F1B; --ink-soft:#6E645B; --line:#E9E0D0;
+    --gold:#EE9F00; --gold-ink:#7A4E00; --gold-tint:#FBEFD3;
+    --coral:#E6482C; --coral-ink:#8A2413; --coral-tint:#FADFD7;
+    --teal:#0E9C9C; --teal-ink:#0A5757; --teal-tint:#D3EEEE;
+    --indigo:#3D57DE; --indigo-ink:#26308A; --indigo-tint:#DEE2FB;
+    --stud-hi:rgba(255,255,255,.55); --stud-lo:rgba(0,0,0,.16);
+    --shadow:0 1px 0 rgba(0,0,0,.04), 0 10px 24px -14px rgba(60,40,20,.4);
+    --radius:18px;
+    --font:ui-rounded,"Nunito","Segoe UI",system-ui,-apple-system,"Noto Sans Thai",sans-serif;
+    --mono:"SF Mono","JetBrains Mono","Consolas",ui-monospace,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --paper:#16120E; --surface:#211B15; --surface-2:#1B1610;
+      --ink:#F4EEE4; --ink-soft:#AEA396; --line:#372E24;
+      --gold:#F7B733; --gold-ink:#F7CE7C; --gold-tint:#3A2B0E;
+      --coral:#FF6A4D; --coral-ink:#FFB0A0; --coral-tint:#3E1B12;
+      --teal:#2CC4C4; --teal-ink:#95E4E4; --teal-tint:#0E3232;
+      --indigo:#7E93FF; --indigo-ink:#C0CBFF; --indigo-tint:#1C2352;
+      --stud-hi:rgba(255,255,255,.22); --stud-lo:rgba(0,0,0,.35);
+      --shadow:0 1px 0 rgba(0,0,0,.2), 0 14px 30px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="light"]{
+    --paper:#FAF6EE; --surface:#FFFFFF; --surface-2:#FDFBF6;
+    --ink:#241F1B; --ink-soft:#6E645B; --line:#E9E0D0;
+    --gold:#EE9F00; --gold-ink:#7A4E00; --gold-tint:#FBEFD3;
+    --coral:#E6482C; --coral-ink:#8A2413; --coral-tint:#FADFD7;
+    --teal:#0E9C9C; --teal-ink:#0A5757; --teal-tint:#D3EEEE;
+    --indigo:#3D57DE; --indigo-ink:#26308A; --indigo-tint:#DEE2FB;
+    --stud-hi:rgba(255,255,255,.55); --stud-lo:rgba(0,0,0,.16);
+    --shadow:0 1px 0 rgba(0,0,0,.04), 0 10px 24px -14px rgba(60,40,20,.4);
+  }
+  :root[data-theme="dark"]{
+    --paper:#16120E; --surface:#211B15; --surface-2:#1B1610;
+    --ink:#F4EEE4; --ink-soft:#AEA396; --line:#372E24;
+    --gold:#F7B733; --gold-ink:#F7CE7C; --gold-tint:#3A2B0E;
+    --coral:#FF6A4D; --coral-ink:#FFB0A0; --coral-tint:#3E1B12;
+    --teal:#2CC4C4; --teal-ink:#95E4E4; --teal-tint:#0E3232;
+    --indigo:#7E93FF; --indigo-ink:#C0CBFF; --indigo-tint:#1C2352;
+    --stud-hi:rgba(255,255,255,.22); --stud-lo:rgba(0,0,0,.35);
+    --shadow:0 1px 0 rgba(0,0,0,.2), 0 14px 30px -16px rgba(0,0,0,.7);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font-family:var(--font); color:var(--ink);
+    background:
+      radial-gradient(circle at 12% -5%, color-mix(in srgb,var(--gold) 12%, transparent), transparent 42%),
+      radial-gradient(circle at 92% 4%, color-mix(in srgb,var(--teal) 12%, transparent), transparent 40%),
+      var(--paper);
+    min-height:100vh; padding:0 20px 72px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .inner{max-width:760px;margin:0 auto}
+
+  /* theme toggle */
+  .toggle{
+    position:fixed;top:16px;right:16px;z-index:10;
+    display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+    background:var(--surface);color:var(--ink);border:1px solid var(--line);
+    border-radius:999px;padding:8px 14px;font-family:var(--font);font-weight:800;font-size:.82rem;
+    box-shadow:var(--shadow);
+  }
+  .toggle:focus-visible{outline:3px solid var(--indigo);outline-offset:2px}
+
+  /* ---------- hero ---------- */
+  .hero{padding:64px 0 28px;text-align:center}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--coral-ink);background:var(--coral-tint);
+    padding:7px 14px;border-radius:999px;
+  }
+  .eyebrow .dot{width:9px;height:9px;border-radius:3px;background:var(--coral);box-shadow:2px 2px 0 var(--gold)}
+  h1{
+    font-size:clamp(2.4rem,7vw,3.9rem);line-height:1.02;font-weight:900;
+    letter-spacing:-.02em;margin:20px 0 0;text-wrap:balance;
+  }
+  h1 .pop{color:var(--coral)}
+  .lede{
+    max-width:52ch;margin:16px auto 0;font-size:1.08rem;line-height:1.65;
+    color:var(--ink-soft);text-wrap:pretty;
+  }
+
+  .demo{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:34px}
+  .chip{
+    position:relative;border-radius:12px;padding:16px 15px 13px;min-width:96px;
+    font-weight:800;font-size:.86rem;color:#fff;text-align:center;
+    box-shadow:inset 0 -5px 0 var(--stud-lo), var(--shadow);
+    animation:drop .6s cubic-bezier(.2,.9,.3,1.3) backwards;
+  }
+  .chip small{display:block;font-weight:700;font-size:.72rem;opacity:.9;margin-top:3px}
+  .chip::before{
+    content:"";position:absolute;top:-7px;left:50%;transform:translateX(-50%);
+    width:26px;height:11px;border-radius:6px 6px 3px 3px;background:inherit;
+    box-shadow:inset 0 3px 0 var(--stud-hi), inset 0 -2px 0 var(--stud-lo);
+  }
+  .chip.g{background:var(--gold);color:#3a2600;animation-delay:.05s}
+  .chip.c{background:var(--coral);animation-delay:.18s}
+  .chip.t{background:var(--teal);animation-delay:.31s}
+  .chip.i{background:var(--indigo);animation-delay:.44s}
+  @keyframes drop{from{opacity:0;transform:translateY(-22px) rotate(-4deg)}to{opacity:1;transform:none}}
+
+  /* ---------- sections ---------- */
+  .section{margin-top:56px}
+  .kicker{
+    font-size:.8rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--teal-ink);margin:0 0 4px;
+  }
+  h2{font-size:clamp(1.5rem,4vw,2rem);font-weight:900;letter-spacing:-.01em;margin:0;text-wrap:balance}
+  .sub{color:var(--ink-soft);margin:8px 0 0;line-height:1.6;max-width:56ch}
+
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}
+  .card{
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 18px;box-shadow:var(--shadow);
+  }
+  .card .num{
+    display:inline-grid;place-items:center;width:34px;height:34px;border-radius:10px;
+    font-weight:900;font-size:1rem;color:#fff;margin-bottom:12px;
+    box-shadow:inset 0 -4px 0 var(--stud-lo);
+  }
+  .card h3{margin:0 0 6px;font-size:1.05rem;font-weight:850}
+  .card p{margin:0;color:var(--ink-soft);font-size:.92rem;line-height:1.55}
+  .card code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);padding:1px 6px;border-radius:6px;border:1px solid var(--line)}
+  @media(max-width:640px){.cards{grid-template-columns:1fr}}
+
+  /* ---------- chain ---------- */
+  .chain{display:flex;flex-direction:column;align-items:center;margin-top:26px}
+  .snap{width:6px;height:22px;border-radius:3px;background:var(--line)}
+  .brick{
+    width:100%;background:var(--surface);border-radius:var(--radius);
+    border:1px solid var(--line);box-shadow:var(--shadow);
+    display:grid;grid-template-columns:64px 1fr;overflow:hidden;position:relative;
+    transition:transform .16s ease, box-shadow .16s ease;
+  }
+  .brick:hover{transform:translateY(-3px);box-shadow:0 1px 0 rgba(0,0,0,.05),0 20px 34px -18px rgba(60,40,20,.5)}
+  .brick .no{display:grid;place-content:center;font-weight:900;font-size:1.5rem;color:#fff;position:relative}
+  .brick .no::after{
+    content:"";position:absolute;top:8px;left:50%;transform:translateX(-50%);
+    width:34px;height:8px;border-radius:5px;
+    background:
+      radial-gradient(circle at 25% 50%, var(--stud-hi) 0 3px, transparent 3.5px),
+      radial-gradient(circle at 75% 50%, var(--stud-hi) 0 3px, transparent 3.5px);
+    opacity:.8;
+  }
+  .brick .body{padding:16px 18px 16px 16px}
+  .eq{
+    font-family:var(--mono);font-size:clamp(1rem,2.7vw,1.28rem);font-weight:700;
+    letter-spacing:-.01em;line-height:1.35;color:var(--ink);
+  }
+  .eq sub{font-size:.62em;font-weight:700}
+  .name{display:inline-block;margin:9px 0 5px;font-weight:850;font-size:.82rem;padding:2px 9px;border-radius:999px}
+  .say{margin:0;color:var(--ink-soft);font-size:.94rem;line-height:1.55}
+
+  .g .no{background:var(--gold);color:#3a2600}
+  .g .name{background:var(--gold-tint);color:var(--gold-ink)}
+  .c .no{background:var(--coral)}   .c .name{background:var(--coral-tint);color:var(--coral-ink)}
+  .t .no{background:var(--teal)}    .t .name{background:var(--teal-tint);color:var(--teal-ink)}
+  .i .no{background:var(--indigo)}  .i .name{background:var(--indigo-tint);color:var(--indigo-ink)}
+  .card.g .num{background:var(--gold);color:#3a2600}
+  .card.c .num{background:var(--coral)}
+  .card.t .num{background:var(--teal)}
+
+  .startcap,.endcap{
+    width:100%;border-radius:var(--radius);padding:16px 20px;color:#fff;
+    display:flex;align-items:center;gap:14px;box-shadow:inset 0 -6px 0 var(--stud-lo),var(--shadow);
+  }
+  .startcap{background:var(--gold);color:#3a2600}
+  .endcap{background:var(--indigo)}
+  .cap-ico{font-size:1.6rem;line-height:1}
+  .startcap b,.endcap b{font-size:1.06rem;font-weight:900;display:block}
+  .startcap span,.endcap span{font-size:.9rem;opacity:.92;font-weight:600}
+  .startcap .mono,.endcap .mono{font-family:var(--mono);font-weight:700}
+
+  .legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:20px;justify-content:center}
+  .leg{display:inline-flex;align-items:center;gap:8px;font-size:.85rem;font-weight:700;color:var(--ink-soft)}
+  .leg i{width:14px;height:14px;border-radius:4px;box-shadow:inset 0 -3px 0 var(--stud-lo)}
+
+  /* ---------- fork ---------- */
+  .fork{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px}
+  .out{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:15px 16px;box-shadow:var(--shadow)}
+  .out .cond{font-family:var(--mono);font-size:.9rem;font-weight:700;color:var(--ink)}
+  .out .arrow{color:var(--ink-soft);margin:0 6px}
+  .out .verdict{font-weight:900;font-size:1.05rem;margin-top:6px}
+  .out .note{color:var(--ink-soft);font-size:.86rem;margin-top:2px}
+  .out.pass .verdict{color:var(--ink-soft)}
+  .out.buy .verdict{color:var(--teal)}
+  .out.sell .verdict{color:var(--coral)}
+  @media(max-width:560px){.fork{grid-template-columns:1fr}}
+
+  /* ---------- rules ---------- */
+  .rules{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}
+  .sticker{background:var(--surface-2);border:1px dashed var(--line);border-radius:16px;padding:18px}
+  .sticker .ico{font-size:1.5rem}
+  .sticker h4{margin:8px 0 5px;font-size:.98rem;font-weight:850}
+  .sticker p{margin:0;color:var(--ink-soft);font-size:.88rem;line-height:1.5}
+  .sticker code{font-family:var(--mono);font-size:.84em;background:var(--surface);padding:1px 5px;border-radius:5px;border:1px solid var(--line)}
+  @media(max-width:640px){.rules{grid-template-columns:1fr}}
+
+  footer{margin-top:64px;text-align:center;color:var(--ink-soft);font-size:.86rem;line-height:1.7}
+  footer code{font-family:var(--mono);font-size:.9em}
+
+  @media (prefers-reduced-motion:reduce){
+    .chip{animation:none}
+    .brick{transition:none}
+    .brick:hover{transform:none}
+  }
+</style>
+</head>
+<body>
+
+<button class="toggle" id="themeBtn" type="button" aria-label="สลับโหมดสว่าง/มืด">🌗 <span id="themeLbl">โหมด</span></button>
+
+<div class="inner">
+
+  <!-- HERO -->
+  <header class="hero">
+    <span class="eyebrow"><span class="dot"></span>คู่มือต่อบล็อก · LEGO Equation</span>
+    <h1>ราคาเดียว<br>ต่อเป็น <span class="pop">1 แถว</span> 🧱</h1>
+    <p class="lede">อ่านราคาตอนนี้กับแถวก่อนหน้า <b>แค่ครั้งเดียว</b> แล้วต่อบล็อกสมการทีละก้อน จนได้ final row — ไม่ต้องเปิดโค้ดเลย</p>
+    <div class="demo">
+      <div class="chip g">อ่านราคา<small>Pₙ, holdings</small></div>
+      <div class="chip c">คิด gap<small>ห่างเป้าเท่าไร</small></div>
+      <div class="chip t">คิด ledger<small>Rₙ→ΔAₙ→Aₙ→Eₙ</small></div>
+      <div class="chip i">ได้ 1 แถว<small>17 คอลัมน์</small></div>
+    </div>
+  </header>
+
+  <!-- BIG IDEA -->
+  <section class="section">
+    <p class="kicker">ไอเดียใหญ่</p>
+    <h2>ต่อบล็อกแค่ 3 จังหวะ</h2>
+    <p class="sub">ทั้ง pipeline คือสายพานสั้น ๆ อ่านของเข้า → ต่อสมการ → ปิดกล่อง เท่านั้น</p>
+    <div class="cards">
+      <div class="card g">
+        <span class="num">1</span>
+        <h3>อ่านแค่ 2 อย่าง</h3>
+        <p>ราคาปัจจุบัน (<code>snapshot</code>) กับแถวล่าสุดหนึ่งแถว (<code>anchor</code>) — ไม่ลากประวัติทั้งกองมาคิด</p>
+      </div>
+      <div class="card c">
+        <span class="num">2</span>
+        <h3>ต่อบล็อกสมการ</h3>
+        <p>แต่ละก้อนรับผลจากก้อนก่อนหน้า แล้วส่งต่อ — สาย <code>gap</code> กับสาย <code>ledger</code> วิ่งคู่กัน</p>
+      </div>
+      <div class="card t">
+        <span class="num">3</span>
+        <h3>ปิดเป็น 1 แถว</h3>
+        <p>ครบ 17 คอลัมน์ก็ <code>Step 18</code> ต่อแถวใหม่หนึ่งแถวลงสมุด — จบรอบ</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE BUILD -->
+  <section class="section">
+    <p class="kicker">ทางเดินสมการ · ต้น → จบ</p>
+    <h2>ต่อทีละก้อน</h2>
+    <p class="sub">ไล่จากบนลงล่าง แต่ละบล็อกมีสมการจริง + คำแปลภาษาคนหนึ่งบรรทัด</p>
+
+    <div class="legend">
+      <span class="leg"><i style="background:var(--gold)"></i>อินพุต</span>
+      <span class="leg"><i style="background:var(--coral)"></i>สายตัดสินใจ (gap)</span>
+      <span class="leg"><i style="background:var(--teal)"></i>สายสมุด (ledger)</span>
+      <span class="leg"><i style="background:var(--indigo)"></i>ผลลัพธ์</span>
+    </div>
+
+    <div class="chain">
+      <div class="startcap">
+        <span class="cap-ico">📥</span>
+        <div><b>เริ่ม — เปิดกล่อง</b><span>อ่าน <span class="mono">Pₙ, holdings</span> และ anchor <span class="mono">P₀, Pₙ₋₁, Aₙ₋₁</span></span></div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick c">
+        <div class="no">1</div>
+        <div class="body">
+          <div class="eq">V<sub>n</sub> = holdings × P<sub>n</sub></div>
+          <span class="name">มูลค่าพอร์ตตอนนี้</span>
+          <p class="say">มีของกี่ชิ้น คูณราคาต่อชิ้น = เงินในพอร์ตตอนนี้จริง ๆ</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick c">
+        <div class="no">2</div>
+        <div class="body">
+          <div class="eq">gap = FIX_C − V<sub>n</sub></div>
+          <span class="name">ยังห่างเป้าเท่าไร</span>
+          <p class="say">เป้าหมาย (<code style="font-family:var(--mono)">FIX_C</code>) ลบของจริง — บวก = ของน้อยไป, ลบ = ของเยอะไป</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick c">
+        <div class="no">3</div>
+        <div class="body">
+          <div class="eq">Quantity = round( |gap| ÷ P<sub>n</sub> , 5 )</div>
+          <span class="name">ต้องขยับกี่หน่วย</span>
+          <p class="say">ช่องว่างหารด้วยราคา = จำนวนที่ต้องซื้อหรือขายให้กลับเข้าเป้า</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick t">
+        <div class="no">4</div>
+        <div class="body">
+          <div class="eq">R<sub>n</sub> = FIX_C × ln( P<sub>n</sub> ÷ P<sub>0</sub> )</div>
+          <span class="name">เส้นอ้างอิง</span>
+          <p class="say">ถ้าเดินตามราคาล้วน ๆ พอร์ตควรได้เท่านี้ — เอาไว้เทียบว่าจริงดีกว่าหรือแย่กว่าแผน</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick t">
+        <div class="no">5</div>
+        <div class="body">
+          <div class="eq">ΔA<sub>n</sub> = FIX_C × ( P<sub>n</sub> ÷ P<sub>n−1</sub> − 1 )</div>
+          <span class="name">เปลี่ยนจริงรอบนี้</span>
+          <p class="say">ราคาขยับจากแถวก่อนหน้าเท่าไร กลายเป็นกำไร/ขาดทุนของก้าวนี้</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick t">
+        <div class="no">6</div>
+        <div class="body">
+          <div class="eq">A<sub>n</sub> = A<sub>n−1</sub> + ΔA<sub>n</sub></div>
+          <span class="name">สะสมจริง</span>
+          <p class="say">เอาของรอบก่อนมาบวกก้าวใหม่ — ยอดสะสมจริงตั้งแต่แถวแรกจนตอนนี้</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="brick t">
+        <div class="no">7</div>
+        <div class="body">
+          <div class="eq">E<sub>n</sub> = A<sub>n</sub> − R<sub>n</sub></div>
+          <span class="name">ส่วนเกิน</span>
+          <p class="say">ของจริงลบเส้นอ้างอิง — บวกคือชนะแผน, ลบคือตามหลังแผน</p>
+        </div>
+      </div>
+      <div class="snap"></div>
+
+      <div class="endcap">
+        <span class="cap-ico">✅</span>
+        <div><b>จบ — ปิดกล่อง</b><span>ครบ 17 คอลัมน์ → <span class="mono">Step 18</span> ต่อ final row ลงสมุดหนึ่งแถว</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DECISION FORK -->
+  <section class="section">
+    <p class="kicker">บล็อกทางแยก · Step 8</p>
+    <h2>gap พาไปทางไหน?</h2>
+    <p class="sub">คิด gap ครั้งเดียว แล้วเลือกป้ายผลลัพธ์ 1 ใน 4 — <code style="font-family:var(--mono)">DIFF</code> คือแถบยอมรับได้รอบเป้า</p>
+    <div class="fork">
+      <div class="out pass">
+        <div><span class="cond">DNA = 0</span><span class="arrow">→</span></div>
+        <div class="verdict">PASS · พัก</div>
+        <p class="note">สัญญาณสั่งพัก ไม่ทำอะไรรอบนี้</p>
+      </div>
+      <div class="out pass">
+        <div><span class="cond">|gap| ≤ DIFF</span><span class="arrow">→</span></div>
+        <div class="verdict">PASS · ใกล้พอแล้ว</div>
+        <p class="note">ห่างเป้านิดเดียว ไม่ต้องขยับ</p>
+      </div>
+      <div class="out buy">
+        <div><span class="cond">gap &gt; DIFF</span><span class="arrow">→</span></div>
+        <div class="verdict">BUY · ซื้อเพิ่ม</div>
+        <p class="note">ของน้อยกว่าเป้า เติมเข้าพอร์ต</p>
+      </div>
+      <div class="out sell">
+        <div><span class="cond">gap &lt; −DIFF</span><span class="arrow">→</span></div>
+        <div class="verdict">SELL · ขายออก</div>
+        <p class="note">ของเกินเป้า ปล่อยออกบางส่วน</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- RULES -->
+  <section class="section">
+    <p class="kicker">กฎกันพลาด</p>
+    <h2>3 กติกาที่บล็อกต้องเคารพ</h2>
+    <div class="rules">
+      <div class="sticker">
+        <div class="ico">🧩</div>
+        <h4>แถวแรกเริ่มที่ศูนย์</h4>
+        <p>ไม่มี anchor ก็ตั้ง <code>P₀ = Pₙ</code> และ <code>R₀ = ΔA₀ = A₀ = E₀ = 0</code></p>
+      </div>
+      <div class="sticker">
+        <div class="ico">🛑</div>
+        <h4>ข้อมูลไม่ครบ = หยุด</h4>
+        <p>ราคาไม่เป็นบวก หรือ quantity เป็นศูนย์ ต้อง <b>fail closed</b> ทันที ไม่เดาต่อ</p>
+      </div>
+      <div class="sticker">
+        <div class="ico">🔁</div>
+        <h4>กดซ้ำไม่เพิ่มซ้ำ</h4>
+        <p>กด <code>Step 18</code> ด้วย <code>run_id</code> เดิม จะไม่สร้างเอกสารซ้ำ (idempotent)</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    ต่อจากสกิล <code>lego-equation-flowchart</code> · ตรงกับโค้ดจริงใน <code>lego_one_row.py</code><br>
+    สาย gap = ตัดสินใจซื้อ/ขาย · สาย ledger = จดบัญชีเทียบแผน · ปิดที่ Step 18
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement, btn=document.getElementById('themeBtn'), lbl=document.getElementById('themeLbl');
+    function current(){
+      var set=root.getAttribute('data-theme');
+      if(set) return set;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function paint(){ lbl.textContent = current()==='dark' ? 'สว่าง' : 'มืด'; }
+    btn.addEventListener('click', function(){
+      root.setAttribute('data-theme', current()==='dark' ? 'light' : 'dark');
+      paint();
+    });
+    paint();
+  })();
+</script>
+</body>
+</html>
