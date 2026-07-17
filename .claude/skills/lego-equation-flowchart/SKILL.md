@@ -52,6 +52,7 @@ flowchart TD
 
 - อ่านค่าเดียว: current snapshot (Pₙ, holdings) กับ anchor แถวเดียว (P₀, Pₙ₋₁, Aₙ₋₁) ไม่มี history หลายแถว
 - **นับ step (Step 4):** `dna_step = anchor.dna_step + 1`, chain ใหม่เริ่มที่ `0` และเก็บต่อเนื่องใน state ข้ามแถว
+- **step +1 ทุกแถวเสมอ:** DNA ถูก decode ล่วงหน้าเป็นตารางล็อกตาม slot เวลา (index = slot ที่เทรนไว้); ทุกแถวกิน 1 slot จึง `+1` ไม่ว่าจะ PASS หรือเทรด ห้ามข้าม/ซ้ำ — `version` monotonic + `run_id` (idempotent) กันนับซ้ำ
 - **decode DNA (Step 5):** `decode_dna(DNA_CODE)` → อาเรย์ `0/1` ความยาวคงที่ (`bypass:100` = `1` ครบ 100 ช่อง); `dna[0] = 1` เสมอ (แถวแรก gate เปิด)
 - **gate 0/1:** `signal = dna[step]` — `0` = ปิด → `PASS_DNA_ZERO` (quantity 0); `1` = เปิด → คิด gap ต่อ (BUY/SELL/PASS_THRESHOLD)
 - **DNA หมด:** `step ≥ len(dna)` → fail closed (`"DNA exhausted"`)

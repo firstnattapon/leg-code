@@ -156,6 +156,25 @@
   .warn code{font-family:var(--mono);font-size:.85em;background:var(--surface);padding:1px 5px;border-radius:5px;border:1px solid var(--line)}
   @media(max-width:560px){.switch{grid-template-columns:1fr}}
 
+  /* ---------- time-slot ruler ---------- */
+  .slots{display:flex;gap:8px;overflow-x:auto;padding:28px 4px 8px}
+  .slot{
+    flex:0 0 auto;width:54px;border-radius:12px;border:1px solid var(--line);
+    background:var(--surface);text-align:center;padding:8px 0 10px;position:relative;box-shadow:var(--shadow);
+  }
+  .slot .idx{display:block;font-family:var(--mono);font-size:.72rem;color:var(--ink-soft);font-weight:700}
+  .slot .bit{display:block;font-family:var(--mono);font-weight:900;font-size:1.4rem;margin-top:3px;line-height:1}
+  .slot .bit.on{color:var(--teal)}
+  .slot .bit.off{color:var(--coral)}
+  .slot.dim{opacity:.45}
+  .slot.cur{border-color:var(--violet);box-shadow:0 0 0 3px color-mix(in srgb,var(--violet) 32%,transparent),var(--shadow)}
+  .slot.cur::before{
+    content:"👇 step";position:absolute;top:-24px;left:50%;transform:translateX(-50%);
+    white-space:nowrap;font-size:.72rem;font-weight:800;color:var(--violet-ink);
+    animation:bob 1.4s ease-in-out infinite;
+  }
+  @keyframes bob{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-4px)}}
+
   /* ---------- chain ---------- */
   .chain{display:flex;flex-direction:column;align-items:center;margin-top:26px}
   .snap{width:6px;height:22px;border-radius:3px;background:var(--line)}
@@ -294,7 +313,7 @@
       <div class="card v">
         <span class="num">4</span>
         <h3>นับ step</h3>
-        <p>chain ใหม่เริ่มที่ <code>0</code>; แถวถัดไป = <code>anchor.dna_step + 1</code> — จำต่อเนื่องในสมุด ไม่นับใหม่ทุกครั้ง</p>
+        <p>chain ใหม่เริ่มที่ <code>0</code>; แถวถัดไป = <code>anchor.dna_step + 1</code> <b>ทุกแถวเสมอ</b> — จำต่อเนื่องในสมุด</p>
       </div>
       <div class="card v">
         <span class="num">5</span>
@@ -322,6 +341,43 @@
     <div class="warn">
       <span>⚠️</span>
       <div>DNA มีความยาวจำกัด — ถ้า <code>step ≥ len(dna)</code> แปลว่าเดินจนสุดสาย ต้องหยุดแบบ <b>fail closed</b> (<code>"DNA exhausted"</code>) ไม่เดาต่อ</div>
+    </div>
+  </section>
+
+  <!-- STEP LOCK -->
+  <section class="section">
+    <p class="kicker">ตารางเวลา · การนับ step</p>
+    <h2>ทำไม step ต้อง +1 <span class="pop">ทุกครั้ง</span></h2>
+    <p class="sub">DNA ไม่ได้สุ่มสด ๆ — มันถูก decode ไว้ <b>ล่วงหน้าเป็นตารางที่ล็อกตาม slot เวลา</b> เหมือนตารางรถไฟที่จองที่นั่งไว้แล้ว ช่องที่ <code>step</code> ชี้ = ค่าที่เทรน/กำหนดไว้ตรงเวลานั้น ดังนั้น step ต้องเดินทีละช่อง +1 ห้ามข้าม ห้ามซ้ำ</p>
+
+    <div class="slots" role="img" aria-label="ตาราง slot เวลา ที่ decode ไว้ล่วงหน้า step ชี้ทีละช่อง">
+      <div class="slot"><span class="idx">0</span><span class="bit on">1</span></div>
+      <div class="slot"><span class="idx">1</span><span class="bit on">1</span></div>
+      <div class="slot"><span class="idx">2</span><span class="bit off">0</span></div>
+      <div class="slot cur"><span class="idx">3</span><span class="bit on">1</span></div>
+      <div class="slot"><span class="idx">4</span><span class="bit off">0</span></div>
+      <div class="slot"><span class="idx">5</span><span class="bit on">1</span></div>
+      <div class="slot"><span class="idx">6</span><span class="bit on">1</span></div>
+      <div class="slot dim"><span class="idx">…</span><span class="bit">·</span></div>
+    </div>
+    <p class="sub" style="margin-top:6px">index ของช่อง = slot เวลา · <span style="color:var(--teal-ink);font-weight:800">1 เปิด</span> / <span style="color:var(--coral-ink);font-weight:800">0 ปิด</span> ถูกวางไว้ก่อนแล้ว — step แค่เดินไปอ่านตามคิว</p>
+
+    <div class="cards" style="margin-top:20px">
+      <div class="card v">
+        <span class="num">+1</span>
+        <h3>ขยับทุกแถว เสมอ</h3>
+        <p>ทุกแถวใหม่กิน 1 slot เวลา → <code>step +1</code> ไม่ว่าจะ <b>PASS หรือ BUY/SELL</b> — ไม่มีการหยุดนับ</p>
+      </div>
+      <div class="card v">
+        <span class="num">🔒</span>
+        <h3>slot ถูกล็อก</h3>
+        <p>decode ครั้งเดียวได้ตารางตายตัว ช่องที่ step ชี้ = ค่าที่เทรนไว้ล่วงหน้าตรงเวลานั้น</p>
+      </div>
+      <div class="card v">
+        <span class="num">🚫</span>
+        <h3>ข้าม/ซ้ำไม่ได้</h3>
+        <p>ข้ามหรือซ้ำ = อ่านผิดช่อง หลุดตารางที่วางไว้ · <code>version</code> monotonic + <code>run_id</code> กันนับซ้ำ</p>
+      </div>
     </div>
   </section>
 
