@@ -269,6 +269,18 @@ def test_run_id_changes_with_new_snapshot():
     assert ctx1.run_id != ctx2.run_id
 
 
+def test_run_id_nonce_makes_each_prepared_run_unique():
+    ctx = make_ctx()
+    # A random nonce per Connect/Run ALL yields a unique run_id even when the
+    # snapshot and anchor are identical; an empty nonce stays deterministic.
+    id_a = compute_run_id(ctx.chain_key, ctx.anchor, ctx.snapshot, nonce="n1")
+    id_b = compute_run_id(ctx.chain_key, ctx.anchor, ctx.snapshot, nonce="n2")
+    assert id_a != id_b
+    assert compute_run_id(ctx.chain_key, ctx.anchor, ctx.snapshot) == compute_run_id(
+        ctx.chain_key, ctx.anchor, ctx.snapshot
+    )
+
+
 def test_compute_row_is_deterministic():
     ctx = make_ctx()
     a = compute_row(ctx)

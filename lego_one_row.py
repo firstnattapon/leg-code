@@ -273,16 +273,24 @@ def compute_chain_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def compute_run_id(chain_key: str, anchor: PreviousAnchor, snapshot: CurrentSnapshot) -> str:
-    """Deterministic per (chain, anchor version, captured snapshot).
+def compute_run_id(
+    chain_key: str,
+    anchor: PreviousAnchor,
+    snapshot: CurrentSnapshot,
+    nonce: str = "",
+) -> str:
+    """Run identity for one prepared run.
 
-    Pressing Step 18 twice in the same run reuses the same snapshot and anchor,
-    so the run_id is identical and the append is idempotent.  A fresh Connect &
-    Load captures a new snapshot and therefore a new run_id.
+    ``nonce`` is a per-preparation random token: each Connect & Load / Run ALL
+    generates a fresh one, so every prepared run gets a **unique** run_id even if
+    the price, holdings, and anchor are unchanged.  The run_id is stored in the
+    session for the life of that prepared run, so re-clicking Step 18 on the same
+    draft still reuses the same run_id and stays idempotent (double-click safe).
+    An empty ``nonce`` keeps the id deterministic from the snapshot/anchor.
     """
 
     payload = "\x00".join(
-        (chain_key, str(int(anchor.version)), snapshot.fingerprint())
+        (chain_key, str(int(anchor.version)), snapshot.fingerprint(), str(nonce))
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 

@@ -183,3 +183,20 @@ def test_production_order_panel_is_locked(patched_step0):
     assert any("read-only" in e.value for e in app.error)
     # No UAT submit button is rendered in Production.
     assert not any(b.label.startswith("🚀 Submit order") for b in app.button)
+
+
+def test_uat_order_panel_exposes_preview_submit_query(patched_step0):
+    config = make_config()
+    ctx, store, computed, _ = connect_and_prepare_run(
+        make_settings("Test (UAT)"), config, symbol="AAPL", dna_code="bypass:100"
+    )
+    app = AppTest.from_file("lego_dashboard.py")
+    _seed_committed_session(app, environment="Test (UAT)", store=store, ctx=ctx, computed=computed, config=config)
+    app.run(timeout=30)
+    assert not app.exception
+    labels = [b.label for b in app.button]
+    assert "Preview order" in labels
+    assert "Query order status" in labels  # lets the user verify delivery to Webull
+    submit = next(b for b in app.button if b.label.startswith("🚀 Submit order"))
+    # Submit stays disabled until Preview + a matching confirmation phrase.
+    assert submit.disabled

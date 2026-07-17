@@ -189,7 +189,10 @@ def connect_and_prepare_run(
         snapshot.environment, snapshot.account_fingerprint, snapshot.symbol, params
     )
     anchor = anchor_from_state(read_anchor_state(store, chain_key))
-    run_id = compute_run_id(chain_key, anchor, snapshot)
+    # A per-preparation random nonce guarantees a unique run_id for each Connect
+    # & Load / Run ALL, even when price/holdings/anchor are unchanged.  The id is
+    # then held for this prepared run, so re-clicking Step 18 stays idempotent.
+    run_id = compute_run_id(chain_key, anchor, snapshot, nonce=uuid.uuid4().hex)
     ctx = RunContext(
         run_id=run_id, chain_key=chain_key, snapshot=snapshot, anchor=anchor, params=params
     )
@@ -282,6 +285,37 @@ def _record_order_audit(config: LegoDashboardConfig, event: dict[str, Any]) -> s
     return None
 
 
+def _order_badge(action: str, summary_view: dict[str, Any]) -> tuple[str | None, str]:
+    """Human-readable status that never mislabels a fill and confirms delivery."""
+
+    status = summary_view.get("status")
+    category = summary_view.get("status_category")
+    order_id = summary_view.get("order_id")
+    label = status or category
+    if action == "PREVIEW":
+        return ("Preview สำเร็จ — Webull ตรวจ payload แล้ว (ยังไม่ได้ส่งคำสั่ง)", "success")
+    if action == "SUBMIT":
+        if summary_view.get("is_filled"):
+            return (f"ส่งคำสั่งแล้ว · order_id={order_id} · FILLED", "success")
+        if order_id:
+            return (
+                f"✅ ส่งถึง Webull แล้ว · order_id={order_id} · สถานะ={label} — "
+                "SUBMITTED/PENDING ยังไม่ใช่ FILLED; UAT เป็น paper จึงไม่กระทบ holdings จริง",
+                "warning",
+            )
+        return (
+            f"⚠️ Webull ตอบกลับแต่ไม่มี order_id · สถานะ={label} — ดู raw ด้านล่างและกด Query ตรวจซ้ำ",
+            "error",
+        )
+    if action == "QUERY":
+        if summary_view.get("is_filled"):
+            return (f"order_id={order_id} · FILLED", "success")
+        if order_id:
+            return (f"พบคำสั่งที่ Webull · order_id={order_id} · สถานะ={label}", "info")
+        return ("Webull ไม่พบคำสั่งนี้ — order อาจยังไม่ถูกส่งสำเร็จ", "error")
+    return (None, "info")
+
+
 def _run_order_action(
     *,
     action: str,
@@ -300,9 +334,12 @@ def _run_order_action(
         summary_view = summarize_order_result(safe_result)
         if store_preview is not None:
             st.session_state[f"{prefix}_preview_state"] = dict(store_preview)
+        badge, level = _order_badge(action, summary_view)
         st.session_state[f"{prefix}_output"] = {
             "action": action,
             "result": {"summary": summary_view, "raw": safe_result},
+            "badge": badge,
+            "level": level,
         }
         warning = _record_order_audit(
             config,
@@ -374,6 +411,11 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         f"Account #{account_fingerprint(settings.account_id)} · {symbol} · {side} · {quantity} "
         f"· run_id {ctx.run_id[:12]}… · ค่าเหล่านี้ล็อกจาก final row แก้ไม่ได้"
     )
+    st.info(
+        "ลำดับส่งคำสั่ง: (1) กด **Preview order** ให้ Webull ตรวจ payload → (2) พิมพ์ confirmation "
+        "phrase ให้ตรง → (3) กด **Submit order (UAT)** → (4) กด **Query** ยืนยันว่า Webull รับ order "
+        "(ปุ่ม Submit จะเปิดก็ต่อเมื่อ Preview แล้วและ phrase ตรง)"
+    )
 
     prefix = f"order_{ctx.run_id[:8]}"
     trading_session = st.selectbox(
@@ -442,7 +484,10 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         safety_switch=True,  # UAT has no production safety switch
     )
     if not gate.allowed:
-        st.caption("ยังส่งไม่ได้: " + " · ".join(gate.reasons))
+        st.warning(
+            "ยังกด Submit ไม่ได้ (ปุ่มถูกปิด): " + " · ".join(gate.reasons)
+            + " — ต้องกด **Preview order** ก่อน แล้วพิมพ์ confirmation phrase ให้ตรง"
+        )
 
     if st.button(
         "🚀 Submit order (UAT)",
@@ -460,8 +505,26 @@ def render_order_panel(config: LegoDashboardConfig) -> None:
         )
         st.session_state.pop(f"{prefix}_preview_state", None)
 
+    st.markdown("#### ตรวจว่าคำสั่งถึง Webull จริง (Query)")
+    st.caption(
+        "UAT เป็น paper trading — holdings จริงไม่ขยับ และ draft row ใช้ snapshot ตอน Step 0 "
+        "(ต้อง Connect ใหม่เพื่อเห็น holdings อัปเดต) · ใช้ Query เพื่อยืนยันว่า Webull รับ order แล้ว"
+    )
+    if st.button("Query order status", key=f"{prefix}_query"):
+        _run_order_action(
+            action="QUERY",
+            settings=settings,
+            config=config,
+            request_summary={"client_order_id": client_order_id},
+            call=lambda: WebullManualClient(settings).get_order_detail(client_order_id),
+            prefix=prefix,
+        )
+
     output = st.session_state.get(f"{prefix}_output")
     if output:
+        badge = output.get("badge")
+        if badge:
+            getattr(st, output.get("level", "info"))(badge)
         st.markdown("#### ผลลัพธ์ล่าสุด (redacted)")
         st.json(output.get("result"))
 
