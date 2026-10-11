@@ -1,0 +1,20 @@
+%% Rebalancing Playground — Key Final: ปรับทุน = หมุนเส้นรอบจุดส้ม (สรุปเต็มที่ rebalancing_playground.md)
+flowchart TD
+    subgraph INP["🕹️ อินพุต · คุณเลือก"]
+        cIn["🎚️ ทุนใหม่ c′<br/>(ความชันเส้นใหม่)"]
+        pIn["📍 ราคาขณะปรับ P′<br/>(ตำแหน่ง x ของจุดส้ม)"]
+    end
+    pIn --> pivot["🟠 จุดส้ม<br/>พอร์ตตอนนี้ ณ P′<br/>(หมุดที่ไม่ขยับ)"]
+    pivot --> betaN["🧮 beta ใหม่ = ผลลัพธ์<br/>beta += (c − c′)·ln(P′/p₀)<br/>(แอปคำนวณ)"]
+    cIn --> betaN
+    betaN --> newLine["📈 เส้นใหม่<br/>V(p) = beta + c′·ln(p/p₀)"]
+    newLine --> ok["✅ เส้นหมุนรอบจุดส้ม<br/>พอร์ตไม่กระโดด<br/>จำแค่ c, beta"]
+    cIn -. "ถ้าไม่แตะ beta" .-> jump["⚠️ เส้นหมุนรอบ (p₀, beta)<br/>พอร์ตกระโดด<br/>Δ = (c′ − c)·ln(P′/p₀)"]
+    classDef inp fill:#E6F0FE,stroke:#2D7FF9,color:#14161C
+    classDef pin fill:#E86A3A,stroke:#E86A3A,color:#fff
+    classDef good fill:#279A6C,stroke:#279A6C,color:#fff
+    classDef bad fill:#FBEBE2,stroke:#E86A3A,color:#14161C
+    class cIn,pIn inp
+    class pivot pin
+    class ok good
+    class jump bad
